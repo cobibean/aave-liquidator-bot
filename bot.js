@@ -28,57 +28,52 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function attemptLiquidation(position) {
-  const liquidatorABI = require("./artifacts/contracts/AaveLiquidator.sol/AaveLiquidator.json").abi;
-  const liquidator = new ethers.Contract(
-      process.env.AAVE_LIQUIDATOR_ADDRESS,
-      liquidatorABI,
-      wallet
-  );
+async function attemptLiquidation(user, debtAsset, debtAmount, collateral) {
+  console.log(`⚡ Attempting liquidation with:`, { debtAsset, debtAmount, user, collateral });
 
-  console.log(`⚡ Attempting liquidation with:`, {
-      debtAsset: position.debtAsset,
-      debtAmount: position.debtAmount.toString(),
-      user: position.user,
-      collateral: position.collateralAsset
-  });
-
-  // Check for missing or undefined values
-  if (!position.debtAsset || !position.debtAmount || !position.user || !position.collateralAsset) {
-      console.error("❌ Skipping liquidation due to missing data:", position);
+  // Re-check user health factor before proceeding
+  const latestHealthFactor = await getUserHealthFactor(user);
+  if (latestHealthFactor > 1.0) {
+      console.log(`⏳ Skipping ${user}, already liquidated (HF: ${latestHealthFactor}).`);
       return;
   }
 
-  // **🚨 Ensure debt and collateral are different**
-  if (position.debtAsset.toLowerCase() === position.collateralAsset.toLowerCase()) {
-      console.error(`❌ Skipping liquidation: Debt and collateral are the same for user ${position.user}`);
-      return;
-  }
+  // Fetch current gas price and add priority fee
+  const gasPrice = await provider.getGasPrice();
+  const maxPriorityFee = ethers.utils.parseUnits("2", "gwei"); // Adjust for Metis network
+
+  // Prepare transaction
+  const tx = {
+      to: aaveLiquidatorContract.address,
+      data: aaveLiquidatorContract.interface.encodeFunctionData("liquidate", [
+          debtAsset,
+          debtAmount,
+          user,
+          collateral,
+      ]),
+      gasLimit: ethers.utils.hexlify(1_000_000), // Adjust if needed
+      gasPrice: gasPrice.add(maxPriorityFee), // Add a boost to priority
+  };
 
   try {
-      const tx = await liquidator.triggerLiquidation(
-          position.debtAsset,
-          position.debtAmount,
-          position.user,
-          position.collateralAsset,
-          {
-              gasLimit: 1_000_000,
-              gasPrice: await getOptimizedGasPrice()
-          }
-      );
+      // Send transaction
+      const transactionResponse = await signer.sendTransaction(tx);
+      console.log(`✅ TX sent: ${transactionResponse.hash}`);
 
-      console.log(`✅ TX sent: ${tx.hash}`);
-      const receipt = await tx.wait();
-      console.log(`🎉 Liquidation success! Gas used: ${receipt.gasUsed}`);
-
+      // Wait for transaction receipt
+      const receipt = await transactionResponse.wait();
+      if (receipt.status === 1) {
+          console.log(`🎉 Successful liquidation: ${transactionResponse.hash}`);
+      } else {
+          console.log(`⚠️ Liquidation failed on-chain: ${transactionResponse.hash}`);
+      }
   } catch (error) {
-      console.error(`❌ Liquidation failed:`, error.message);
+      if (error.code === "TRANSACTION_REPLACED") {
+          console.log(`⚠️ Transaction was replaced: ${error.replacement.hash}`);
+      } else {
+          console.error(`❌ Liquidation failed:`, error.message);
+      }
   }
-}
-
-async function getOptimizedGasPrice() {
-    const currentGas = await provider.getGasPrice();
-    return currentGas.mul(120).div(100); // Add 20% buffer
 }
 
 main().catch(console.error);
