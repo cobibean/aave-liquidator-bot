@@ -1,3 +1,9 @@
 node_modules/
 .env
 *.log
+keyyy*
+digitalocean
+*_rsa
+*_dsa
+*.pem
+*.key

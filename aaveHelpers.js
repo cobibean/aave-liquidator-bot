@@ -516,35 +516,6 @@ async function getBorrowersFromSubgraph() {
 }
 
 // Fetch user debt, collateral, and health factor
-async function getUserDebtAndHealthFactor(userAddress) {
-    const query = `
-    {
-      userReserves(where: { user: "${userAddress}", currentTotalDebt_gt: "0" }) {
-        reserve {
-          symbol
-          id
-        }
-        currentTotalDebt
-      }
-    }`;
-
-    const response = await fetch("https://metisapi.0xgraph.xyz/subgraphs/name/aave/protocol-v3-metis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
-    });
-
-    const data = await response.json();
-    if (!data.data.userReserves.length) return null; // Skip if no active debt
-
-    return {
-        user: userAddress,
-        debtAssets: data.data.userReserves.map(reserve => ({
-            token: reserve.reserve.symbol,
-            debtAmount: reserve.currentTotalDebt
-        }))
-    };
-}
 
 // Get user's health factor from the Aave contract
 async function getUserHealthFactor(userAddress, provider) {
@@ -570,56 +541,6 @@ async function getUserHealthFactor(userAddress, provider) {
     }
 }
 
-
-
-async function getUnhealthyPositions(provider) {
-    console.log("🔎 Fetching borrowers from The Graph...");
-    
-    const borrowers = await getBorrowersFromSubgraph();
-    if (borrowers.length === 0) {
-        console.warn("⚠️ No borrowers found in The Graph.");
-        return [];
-    }
-
-    console.log(`✅ Checking health factors for ${borrowers.length} borrowers...`);
-    
-    const unhealthyPositions = [];
-
-    for (const user of borrowers) {
-        const healthFactor = await getUserHealthFactor(user, provider);
-        
-        if (healthFactor < parseFloat(process.env.LIQUIDATION_THRESHOLD)) {
-            // Find debt asset and amount
-            const debtAsset = "0xEA32A96608495e54156Ae48931A7c20f0dcc1a21"; // Placeholder
-            const debtAmount = await getDebtAmount(user, debtAsset, provider);
-
-            console.log(`👀 Checking debt for ${user}: ${ethers.utils.formatUnits(debtAmount, 6)} USDC`);
-            
-            if (debtAmount.eq(ethers.constants.Zero)) {
-                console.log(`⚠️ Skipping ${user}: No remaining debt.`);
-                continue; // Skip users with 0 debt
-            }
-
-            const collateralAsset = await getPrimaryCollateral(user);
-            if (!collateralAsset) {
-                console.warn(`⚠️ Skipping ${user}: No valid collateral.`);
-                continue;
-            }
-
-            unhealthyPositions.push({
-                user,
-                debtAsset,
-                debtAmount,
-                collateralAsset
-            });
-
-            console.log(`🔥 Found liquidatable position: ${user} | HF: ${healthFactor} | Debt: ${ethers.utils.formatUnits(debtAmount, 6)} USDC`);
-        }
-    }
-
-    console.log(`📌 Found ${unhealthyPositions.length} liquidatable positions.`);
-    return unhealthyPositions;
-}
 
 // Get user's primary collateral (placeholder, improve later)
 async function getPrimaryCollateral(userAddress) {
@@ -671,7 +592,7 @@ async function getPrimaryCollateral(userAddress) {
 // Get user's debt amount
 async function getDebtAmount(userAddress, provider) {
     console.log(`🔍 Fetching debt for ${userAddress}...`);
-
+  
     const query = `
     {
       userReserves(where: { user: "${userAddress}" }) {
@@ -681,29 +602,29 @@ async function getDebtAmount(userAddress, provider) {
         currentTotalDebt
       }
     }`;
-
+  
     const response = await fetch("https://metisapi.0xgraph.xyz/subgraphs/name/aave/protocol-v3-metis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
     });
-
+  
     const data = await response.json();
     console.log(`📜 Raw debt response for ${userAddress}:`, JSON.stringify(data, null, 2));
-
+  
     if (!data.data.userReserves.length) {
-        console.warn(`⚠️ No debt found for ${userAddress}`);
-        return ethers.constants.Zero;
+      console.warn(`⚠️ No debt found for ${userAddress}`);
+      return ethers.constants.Zero;
     }
-
-    // ✅ **SUM ALL DEBT POSITIONS**
+  
+    // Sum all debt positions
     const totalDebt = data.data.userReserves.reduce((sum, reserve) => {
-        return sum.add(ethers.BigNumber.from(reserve.currentTotalDebt));
+      return sum.add(ethers.BigNumber.from(reserve.currentTotalDebt));
     }, ethers.constants.Zero);
-
+  
     console.log(`💰 Total debt for ${userAddress}: ${ethers.utils.formatUnits(totalDebt, 6)} USDC`);
     return totalDebt;
-}
+  }
 
 // Fetch users who have borrowed from a specific reserve
 async function getReserveUsers(reserveAddress) {
@@ -743,12 +664,64 @@ async function getReserveUsers(reserveAddress) {
     }
 }
 
-module.exports = {
+async function getUnhealthyPositions(provider) {
+    console.log("🔎 Fetching borrowers from The Graph...");
+    
+    const borrowers = await getBorrowersFromSubgraph();
+    if (borrowers.length === 0) {
+      console.warn("⚠️ No borrowers found in The Graph.");
+      return [];
+    }
+  
+    console.log(`✅ Checking health factors for ${borrowers.length} borrowers...`);
+    const unhealthyPositions = [];
+  
+    for (const user of borrowers) {
+      const healthFactor = await getUserHealthFactor(user, provider);
+      if (healthFactor < parseFloat(process.env.LIQUIDATION_THRESHOLD)) {
+        // Use the debt asset from environment variables
+        const debtAsset = process.env.DEBT_ASSET_ADDRESS;
+        const debtAmount = await getDebtAmount(user, provider);
+        
+        console.log(`👀 Checking debt for ${user}: ${ethers.utils.formatUnits(debtAmount, 6)} USDC`);
+        if (debtAmount.eq(ethers.constants.Zero)) {
+          console.log(`⚠️ Skipping ${user}: No remaining debt.`);
+          continue;
+        }
+        
+        // Skip positions with debt under 10 cents (0.099)
+        const debtInUSDC = parseFloat(ethers.utils.formatUnits(debtAmount, 6));
+        if (debtInUSDC < 0.099) {
+          console.log(`⚠️ Skipping ${user}: Debt too small (${debtInUSDC} USDC < 0.099 USDC).`);
+          continue;
+        }
+        
+        const collateralAsset = await getPrimaryCollateral(user);
+        if (!collateralAsset) {
+          console.warn(`⚠️ Skipping ${user}: No valid collateral.`);
+          continue;
+        }
+  
+        unhealthyPositions.push({
+          user,
+          debtAsset,
+          debtAmount,
+          collateralAsset
+        });
+  
+        console.log(`🔥 Found liquidatable position: ${user} | HF: ${healthFactor} | Debt: ${ethers.utils.formatUnits(debtAmount, 6)} USDC`);
+      }
+    }
+  
+    console.log(`📌 Found ${unhealthyPositions.length} liquidatable positions.`);
+    return unhealthyPositions;
+  }
+  
+  module.exports = {
     getUnhealthyPositions,
     getUserHealthFactor,
     getDebtAmount,
     getBorrowersFromSubgraph,
-    getUserDebtAndHealthFactor,
     getPrimaryCollateral,
-    getReserveUsers  // <-- Make sure this is included!
-};
+    // ...other exports as needed
+  };
