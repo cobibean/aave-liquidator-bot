@@ -1,14 +1,14 @@
-# Aave Liquidator Bot for Metis
+# Aave Liquidator Bot
 
-A bot that monitors Aave positions on Metis network and executes liquidations when positions become unhealthy, helping to maintain the health of the protocol while creating profit opportunities.
+A bot that monitors Aave positions across configured Aave V3 markets and executes liquidations when positions become unhealthy, helping to maintain the health of the protocol while creating profit opportunities.
 
 ## Overview
 
-This bot continuously monitors Aave borrowers on the Metis network, identifies positions that have fallen below the health factor threshold, and executes liquidations using flash loans. It's designed to operate efficiently with minimal configuration, making it accessible for both small and large liquidators.
+This bot continuously monitors Aave borrowers on configured networks, identifies positions that have fallen below the health factor threshold, and executes liquidations using flash loans. The default config targets high-TVL Aave V3 markets outside Ethereum mainnet and Linea: Plasma, Arbitrum, Base, Avalanche, and Optimism. Optional configs also exist for Ethereum, Linea, Polygon, and Metis.
 
 ## Features
 
-- **Real-time Monitoring**: Continuously checks borrower positions via The Graph API
+- **Real-time Monitoring**: Scans recent Aave Borrow events and checks positions on-chain
 - **Health Factor Calculation**: Computes health factors for monitored accounts
 - **Liquidation Automation**: Automatically executes liquidations when profitable
 - **Flash Loan Integration**: Uses flash loans to minimize capital requirements
@@ -17,7 +17,7 @@ This bot continuously monitors Aave borrowers on the Metis network, identifies p
 
 ## How It Works
 
-1. The bot queries Aave's subgraph for recent borrowers
+1. The bot scans recent Aave Borrow events for active borrowers
 2. It calculates health factors for each borrower
 3. When it identifies positions below the liquidation threshold, it triggers the liquidation process
 4. The liquidation is executed using a flash loan to borrow the required debt asset
@@ -28,7 +28,7 @@ This bot continuously monitors Aave borrowers on the Metis network, identifies p
 
 - Node.js (v14+)
 - npm or yarn
-- Metis wallet with METIS for gas
+- A wallet funded with each selected chain's gas token
 - Basic understanding of DeFi liquidations
 
 ## Installation
@@ -55,31 +55,45 @@ This bot interacts with a custom AaveLiquidator smart contract that handles the 
 
 [https://github.com/cobibean/flashloan-smart-contracts](https://github.com/cobibean/flashloan-smart-contracts)
 
-The compiled contract artifacts are included in this repository under the `artifacts/` directory.
+The compiled contract artifacts are included in this repository under the `artifacts/` directory. Plasma uses the local `AaveLiquidatorSwapRouter02` variant because its Uniswap router exposes V3 `exactInput`/`exactInputSingle` routing instead of the older V2-style `swapExactTokensForTokens` shape.
 
 ## Configuration
 
 Edit your `.env` file with the following parameters:
 
 ```
-# RPC Configuration
-RPC_URL=https://andromeda.metis.io/?owner=1088
+# Chain Selection
+CHAINS=plasma,arbitrum,base,avalanche,optimism
 
-# Contract Addresses
-AAVE_LIQUIDATOR_ADDRESS=0x...  # Your deployed liquidator contract
-POOL_ADDRESS=0x...             # Aave Pool contract on Metis
-POOL_ADDRESSES_PROVIDER=0x...  # Aave Pool Addresses Provider on Metis
-DEBT_ASSET_ADDRESS=0x...       # USDC address on Metis
+# Per-chain Liquidator Contracts
+PLASMA_AAVE_LIQUIDATOR_ADDRESS=0x...
+ARBITRUM_AAVE_LIQUIDATOR_ADDRESS=0x...
+BASE_AAVE_LIQUIDATOR_ADDRESS=0x...
+AVALANCHE_AAVE_LIQUIDATOR_ADDRESS=0x...
+OPTIMISM_AAVE_LIQUIDATOR_ADDRESS=0x...
 
 # Bot Configuration
 LIQUIDATION_THRESHOLD=1.0      # Health factor threshold for liquidation
+MIN_DEBT_TO_COVER=0.099
+GAS_PRICE_BUMP_GWEI=0
 
 # Security
 PRIVATE_KEY=                   # Your wallet private key
 
 # Optional
 TEST_MODE=true                 # Set to false for actual liquidations
+VERBOSE_HEALTH_LOGS=false      # Set true for per-borrower health factor logs
 ```
+
+Default gas tokens:
+
+- Plasma: XPL
+- Arbitrum: ETH
+- Base: ETH
+- Avalanche C-Chain: AVAX
+- Optimism: ETH
+
+RPC fallbacks are configured in code for public smoke tests. Override them per chain with `ARBITRUM_RPC_URLS=https://...,...` or set a single-chain `RPC_URLS` when using `CHAIN=...`.
 
 ## Usage
 
@@ -89,12 +103,54 @@ Run the bot:
 node bot.js
 ```
 
+Run the five-chain read-only smoke test:
+
+```bash
+npm test
+```
+
+Run static liquidation preflight against real recent borrowers:
+
+```bash
+npm run preflight:liquidation
+```
+
+Check whether the configured DigitalOcean droplet has deployment room:
+
+```bash
+npm run droplet:room
+```
+
+Set `DIGITALOCEAN_API_TOKEN` and `DIGITALOCEAN_DROPLET_NAME` in `.env` first. The checker uses DigitalOcean Monitoring for actual free disk/RAM when available, and can fall back to SSH if `DROPLET_SSH_KEY_PATH` is set.
+
+Estimate or deploy the compiled liquidator artifact:
+
+```bash
+npm run compile
+npm run deploy:liquidator
+DEPLOY_CHAINS=base,avalanche,optimism DEPLOY=true npm run deploy:liquidator
+```
+
+Run one chain only:
+
+```bash
+SMOKE_CHAINS=arbitrum npm run smoke:chains
+CHAIN=arbitrum node bot.js
+```
+
 For production use, consider using a process manager like PM2:
 
 ```bash
 npm install -g pm2
 pm2 start bot.js --name "aave-liquidator"
 pm2 logs aave-liquidator
+```
+
+Or run it with Docker Compose:
+
+```bash
+docker compose up -d --build
+docker compose logs -f aave-liquidator
 ```
 
 ## Monitoring

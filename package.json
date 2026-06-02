@@ -1,9 +1,15 @@
 {
   "name": "aave-liquidator-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "smoke:metis": "SMOKE_CHAINS=metis node scripts/multiChainSmoke.js",
+    "smoke:chains": "node scripts/multiChainSmoke.js",
+    "compile": "node scripts/compileContracts.js",
+    "deploy:liquidator": "node scripts/deployLiquidator.js",
+    "preflight:liquidation": "node scripts/liquidationPreflight.js",
+    "droplet:room": "node scripts/checkDropletRoom.js",
+    "test": "npm run smoke:chains"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +19,11 @@
     "@aave/contract-helpers": "^1.31.1",
     "@aave/core-v3": "^1.19.3",
     "dotenv": "^16.4.7",
-    "ethers": "^5.7.2",
+    "ethers": "^5.8.0",
+    "node-fetch": "^2.7.0",
     "tree": "^0.1.3"
+  },
+  "devDependencies": {
+    "solc": "^0.8.35"
   }
 }

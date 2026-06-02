@@ -3,10 +3,18 @@ const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
 const { getUnhealthyPositions, getUserHealthFactor } = require("./aaveHelpers");
+const { getSelectedChainConfigs } = require("./src/chains");
+const { getTransactionOverrides } = require("./src/gas");
+const { createProvider } = require("./src/provider");
 
-// Set up provider and wallet
-const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+const requiredEnv = ["PRIVATE_KEY"];
+const missingEnv = requiredEnv.filter((name) => !process.env[name]);
+if (missingEnv.length > 0) {
+  throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+}
+
+const testMode = process.env.TEST_MODE !== "false";
+const chainConfigs = getSelectedChainConfigs();
 
 // Load the Aave Liquidator contract ABI and instantiate the contract
 const liquidatorArtifact = JSON.parse(
@@ -16,29 +24,53 @@ const liquidatorArtifact = JSON.parse(
   )
 );
 const aaveLiquidatorABI = liquidatorArtifact.abi;
-const aaveLiquidatorContract = new ethers.Contract(
-  process.env.AAVE_LIQUIDATOR_ADDRESS,
-  aaveLiquidatorABI,
-  wallet
-);
 
 async function main() {
-  console.log("🚀 Starting Aave Liquidator Bot on Metis...");
+  console.log(`🚀 Starting Aave Liquidator Bot on ${chainConfigs.map((chain) => chain.name).join(", ")}...`);
+  if (testMode) {
+    console.log("TEST_MODE is enabled. Liquidations will be logged but not submitted.");
+  }
+
+  await Promise.all(chainConfigs.map(runChainBot));
+}
+
+async function runChainBot(chainConfig) {
+  const provider = createProvider(chainConfig);
+  const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+  const liquidatorAddress = getLiquidatorAddress(chainConfig);
+  const aaveLiquidatorContract = liquidatorAddress
+    ? new ethers.Contract(liquidatorAddress, aaveLiquidatorABI, wallet)
+    : null;
+
+  console.log(`▶️ ${chainConfig.name}: wallet ${wallet.address}`);
+  if (!aaveLiquidatorContract) {
+    console.warn(`⚠️ ${chainConfig.name}: AAVE_LIQUIDATOR_ADDRESS is not set for this chain.`);
+  }
+
+  // Each cycle does an incremental Borrow scan + a parallel HF sweep, so it is
+  // cheap enough to run frequently. The first cycle pays a one-time backfill.
+  const cycleMs = parseInt(process.env.SCAN_INTERVAL_MS || "15000", 10);
 
   while (true) {
+    const cycleStart = Date.now();
     try {
-      const opportunities = await getUnhealthyPositions(provider);
-      console.log(`📌 Found ${opportunities.length} liquidatable positions.`);
-      
-      // IMPORTANT: Destructure the position object properly when calling attemptLiquidation
+      const opportunities = await getUnhealthyPositions(provider, chainConfig);
+      console.log(`📌 ${chainConfig.name}: Found ${opportunities.length} liquidatable positions (cycle ${Date.now() - cycleStart}ms).`);
+
       for (const position of opportunities) {
-        await attemptLiquidation(position);
+        await attemptLiquidation(position, {
+          provider,
+          chainConfig,
+          aaveLiquidatorContract,
+        });
       }
-      
-      await delay(30000); // 30-second cycle
     } catch (error) {
-      console.error("❌ Error in main loop:", error.message);
+      console.error(`❌ ${chainConfig.name}: Error in main loop:`, error.message);
     }
+
+    // Keep a steady cadence regardless of how long the cycle took.
+    const elapsed = Date.now() - cycleStart;
+    await delay(Math.max(cycleMs - elapsed, 1000));
   }
 }
 
@@ -47,17 +79,30 @@ function delay(ms) {
 }
 
 
-async function attemptLiquidation({ user, debtAsset, debtAmount, collateralAsset }) {
+async function attemptLiquidation({
+  user,
+  debtAsset,
+  debtAmount,
+  debtDecimals = 6,
+  debtSymbol = "debt asset",
+  collateralAsset
+}, {
+  provider,
+  chainConfig,
+  aaveLiquidatorContract,
+}) {
   console.log("⚡ Attempting liquidation with:", {
+    chain: chainConfig.name,
     user,
     debtAsset,
-    debtAmount: ethers.utils.formatUnits(debtAmount, 6),
+    debtAmount: ethers.utils.formatUnits(debtAmount, debtDecimals),
+    debtSymbol,
     collateralAsset
   });
 
   // Re-check user health factor (pass both user and provider)
-  const latestHealthFactor = await getUserHealthFactor(user, provider);
-  console.log(`Health factor for ${user}: ${latestHealthFactor}`);
+  const latestHealthFactor = await getUserHealthFactor(user, provider, chainConfig);
+  console.log(`${chainConfig.name}: Health factor for ${user}: ${latestHealthFactor}`);
   if (latestHealthFactor > 1.0) {
     console.log(`⏳ Skipping ${user} (HF: ${latestHealthFactor}).`);
     return;
@@ -71,24 +116,38 @@ async function attemptLiquidation({ user, debtAsset, debtAmount, collateralAsset
   if (latestHealthFactor > CLOSE_FACTOR_HF_THRESHOLD) {
     // Liquidate only 50% of the debt.
     debtToCover = debtAmount.div(2); // BigNumber division (rounding down)
-    console.log(`Partial liquidation: Only covering 50% of the debt: ${ethers.utils.formatUnits(debtToCover, 6)} USDC`);
+    console.log(`Partial liquidation: Only covering 50% of the debt: ${ethers.utils.formatUnits(debtToCover, debtDecimals)} ${debtSymbol}`);
   } else {
-    console.log(`Full liquidation: Covering full debt: ${ethers.utils.formatUnits(debtToCover, 6)} USDC`);
+    console.log(`Full liquidation: Covering full debt: ${ethers.utils.formatUnits(debtToCover, debtDecimals)} ${debtSymbol}`);
+  }
+
+  if (testMode) {
+    console.log("TEST_MODE enabled: skipping transaction submission.", {
+      chain: chainConfig.name,
+      user,
+      debtAsset,
+      debtToCover: debtToCover.toString(),
+      collateralAsset
+    });
+    return;
+  }
+
+  if (!aaveLiquidatorContract) {
+    console.warn(`${chainConfig.name}: No liquidator contract configured; skipping transaction.`);
+    return;
   }
 
   try {
-    const gasPrice = await provider.getGasPrice();
-    const maxPriorityFee = ethers.utils.parseUnits("2", "gwei");
+    const overrides = await getTransactionOverrides(provider, chainConfig, {
+      gasLimit: chainConfig.liquidationGasLimit,
+    });
 
     const tx = await aaveLiquidatorContract.triggerLiquidation(
       debtAsset,
       debtToCover,
       user,
       collateralAsset,
-      {
-        gasLimit: 2_000_000,
-        gasPrice: gasPrice.add(maxPriorityFee)
-      }
+      overrides
     );
 
     console.log(`✅ TX sent: ${tx.hash}`);
@@ -105,6 +164,14 @@ async function attemptLiquidation({ user, debtAsset, debtAmount, collateralAsset
       console.error(`❌ Liquidation failed:`, error.message);
     }
   }
+}
+
+function getLiquidatorAddress(chainConfig) {
+  return (
+    process.env[`${chainConfig.key.toUpperCase()}_AAVE_LIQUIDATOR_ADDRESS`] ||
+    (!process.env.CHAINS && process.env.AAVE_LIQUIDATOR_ADDRESS) ||
+    ""
+  );
 }
 
 

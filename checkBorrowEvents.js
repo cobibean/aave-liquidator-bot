@@ -1,21 +1,24 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
+const { getChainConfig } = require("./src/chains");
+const { createProvider } = require("./src/provider");
 
 async function checkBorrowEvents() {
-    const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
+    const chainConfig = getChainConfig(process.env.CHAIN || "arbitrum");
+    const provider = createProvider(chainConfig);
 
     // Aave v3 Pool Borrow event ABI
     const poolAbi = [
-        "event Borrow(address indexed reserve, address indexed user, uint256 amount, uint256 borrowRateMode, uint256 borrowRate, uint16 referralCode)"
+        "event Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)"
     ];
 
-    const pool = new ethers.Contract(process.env.POOL_ADDRESS, poolAbi, provider);
+    const pool = new ethers.Contract(chainConfig.pool, poolAbi, provider);
 
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = currentBlock - 500000; // Increase to last 500,000 blocks
+    const fromBlock = currentBlock - chainConfig.borrowScanBlocks;
     const toBlock = currentBlock;
 
-    console.log(`🔎 Scanning for Borrow events from block ${fromBlock} to ${toBlock}...`);
+    console.log(`🔎 Scanning ${chainConfig.name} for Borrow events from block ${fromBlock} to ${toBlock}...`);
 
     try {
         const events = await pool.queryFilter(pool.filters.Borrow(), fromBlock, toBlock);
@@ -23,7 +26,7 @@ async function checkBorrowEvents() {
 
         if (events.length > 0) {
             events.forEach((event, index) => {
-                console.log(`🔹 Borrower ${index + 1}: ${event.args.user} - Reserve: ${event.args.reserve} - Amount: ${ethers.utils.formatUnits(event.args.amount, 18)}`);
+                console.log(`🔹 Borrower ${index + 1}: ${event.args.onBehalfOf} - Reserve: ${event.args.reserve} - Amount: ${event.args.amount.toString()}`);
             });
         } else {
             console.log("⚠️ No Borrow events detected in this range. Try increasing the block range further.");

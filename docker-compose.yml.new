@@ -1,0 +1,22 @@
+services:
+  aave-liquidator:
+    build: .
+    container_name: aave-liquidator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TEST_MODE: "${TEST_MODE:-true}"
+      VERBOSE_HEALTH_LOGS: "${VERBOSE_HEALTH_LOGS:-false}"
+    # Persist the borrower store across rebuilds/restarts so the one-time
+    # deep backfill is not lost (otherwise every `up --build` re-backfills).
+    volumes:
+      - liquidator-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  liquidator-data:

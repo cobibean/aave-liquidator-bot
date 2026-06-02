@@ -1,13 +1,12 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
+const { getChainConfig } = require("./src/chains");
+const { createProvider } = require("./src/provider");
 
 async function getAavePoolFromProvider() {
-    if (!process.env.POOL_ADDRESSES_PROVIDER) {
-        console.error("❌ POOL_ADDRESSES_PROVIDER is not set in your .env file!");
-        return;
-    }
+    const chainConfig = getChainConfig(process.env.CHAIN || "arbitrum");
 
-    const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
+    const provider = createProvider(chainConfig);
 
     // ABI to call `getPool()` on PoolAddressesProvider
     const poolProviderAbi = [
@@ -15,14 +14,14 @@ async function getAavePoolFromProvider() {
     ];
 
     const poolProviderContract = new ethers.Contract(
-        process.env.POOL_ADDRESSES_PROVIDER, // This should be the Aave PoolAddressesProvider
+        chainConfig.poolAddressesProvider,
         poolProviderAbi,
         provider
     );
 
     try {
         const realPoolAddress = await poolProviderContract.getPool();
-        console.log(`✅ Real Aave Pool Contract Address: ${realPoolAddress}`);
+        console.log(`✅ ${chainConfig.name} Aave Pool Contract Address: ${realPoolAddress}`);
         return realPoolAddress;
     } catch (error) {
         console.error("❌ Failed to fetch Aave Pool address from provider:", error);

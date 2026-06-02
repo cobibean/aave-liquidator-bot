@@ -1,0 +1,15 @@
+services:
+  aave-liquidator:
+    build: .
+    container_name: aave-liquidator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TEST_MODE: "${TEST_MODE:-true}"
+      VERBOSE_HEALTH_LOGS: "${VERBOSE_HEALTH_LOGS:-false}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
