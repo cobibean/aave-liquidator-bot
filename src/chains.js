@@ -64,6 +64,7 @@ const CHAIN_CONFIGS = {
     wrappedNative: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     swapRouter: "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    hardenedLiquidator: true, // hardened contract deployed 2026-06-02 (via private RPC)
   },
   base: {
     key: "base",
