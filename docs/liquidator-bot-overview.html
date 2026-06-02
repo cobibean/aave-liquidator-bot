@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aave Liquidator Bot — Field Guide</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --paper:#fbf9f4; --card:#ffffff; --muted:#6b6b6b;
+    --line:#e7e2d8; --accent:#c2410c; --accent2:#0f766e; --warn:#b45309;
+    --good:#15803d; --bad:#b91c1c; --chip:#f1ede3;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--ink:#ece8df;--paper:#14130f;--card:#1c1b16;--muted:#a39e92;--line:#2c2a22;--chip:#23211a;}
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:17px}
+  .wrap{max-width:920px;margin:0 auto;padding:0 22px}
+
+  /* Masthead */
+  header.mast{border-bottom:3px solid var(--ink);padding:34px 0 18px;margin-bottom:8px}
+  .kicker{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);font-weight:700}
+  h1{font-size:clamp(34px,6vw,58px);line-height:1.02;margin:.18em 0 .1em;letter-spacing:-.02em;font-weight:800}
+  .dek{font-size:20px;color:var(--muted);max-width:46ch;margin:.2em 0 .6em}
+  .meta{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px;margin-top:14px}
+  .meta b{color:var(--ink)}
+
+  /* TL;DR */
+  .tldr{background:var(--ink);color:var(--paper);border-radius:14px;padding:22px 24px;margin:26px 0}
+  .tldr h2{margin:0 0 .4em;font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:#f5b78f}
+  .tldr ul{margin:0;padding-left:1.1em}
+  .tldr li{margin:.3em 0}
+  .tldr li::marker{color:#f5b78f}
+
+  /* TOC */
+  nav.toc{position:sticky;top:0;background:var(--paper);border-bottom:1px solid var(--line);padding:10px 0;margin:0 0 26px;z-index:5;font-size:13px}
+  nav.toc a{color:var(--muted);text-decoration:none;margin-right:16px;white-space:nowrap}
+  nav.toc a:hover{color:var(--accent)}
+  .toc-scroll{display:flex;overflow-x:auto;gap:2px}
+
+  section{margin:34px 0;scroll-margin-top:56px}
+  h2.sec{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:14px}
+  h3{font-size:22px;margin:1.2em 0 .3em;letter-spacing:-.01em}
+  p{margin:.5em 0}
+
+  .lead::first-letter{font-size:3.1em;float:left;line-height:.72;padding:.04em .08em 0 0;font-weight:800;color:var(--accent)}
+
+  /* Cards & grids */
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:640px){.g2,.g3{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 .3em;font-size:15px}
+  .card .big{font-size:30px;font-weight:800;letter-spacing:-.02em}
+  .card small{color:var(--muted);font-size:12.5px}
+
+  /* Callouts */
+  .call{border-left:4px solid var(--accent);background:var(--chip);border-radius:0 10px 10px 0;padding:12px 16px;margin:16px 0}
+  .call.warn{border-color:var(--warn)}
+  .call.good{border-color:var(--good)}
+  .call.bad{border-color:var(--bad)}
+  .call b{display:block;font-size:12px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.2em}
+  .call.warn b{color:var(--warn)} .call.good b{color:var(--good)} .call.bad b{color:var(--bad)} .call b{color:var(--accent)}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  tbody tr:hover{background:var(--chip)}
+  td.num{font-variant-numeric:tabular-nums;text-align:right}
+  code,.mono{font-family:var(--mono);font-size:.88em;background:var(--chip);padding:1px 5px;border-radius:5px;word-break:break-all}
+  pre{background:var(--ink);color:#e7e3d8;border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.5}
+  pre .c{color:#9aa0a6}
+
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;letter-spacing:.04em}
+  .pill.ok{background:#dcfce7;color:#166534} .pill.no{background:#fee2e2;color:#991b1b} .pill.wait{background:#fef3c7;color:#92400e}
+  @media (prefers-color-scheme: dark){.pill.ok{background:#14331f;color:#86efac}.pill.no{background:#3a1715;color:#fca5a5}.pill.wait{background:#3a2c10;color:#fcd34d}}
+
+  .flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0;font-size:13.5px}
+  .flow .step{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-weight:600}
+  .flow .arr{color:var(--accent);font-weight:800}
+
+  footer{border-top:3px solid var(--ink);margin-top:50px;padding:20px 0 60px;color:var(--muted);font-size:13px}
+  .tag{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+</style>
+</head>
+<body>
+<header class="mast"><div class="wrap">
+  <div class="kicker">Field Guide · Aave V3 Liquidation Bot</div>
+  <h1>The Liquidator</h1>
+  <p class="dek">A multi-chain bot that finds underwater Aave loans and liquidates them for the discount — and the story of why it was catching nothing, and how that got fixed.</p>
+  <div class="meta">
+    <span><b>Status:</b> live on droplet · <span class="pill wait">TEST_MODE</span></span>
+    <span><b>Chains:</b> 5</span>
+    <span><b>Updated:</b> 2026-06-02</span>
+    <span><b>Audience:</b> humans &amp; agents</span>
+  </div>
+</div></header>
+
+<div class="wrap">
+
+<div class="tldr">
+  <h2>TL;DR — read this first</h2>
+  <ul>
+    <li><b>What it does:</b> watches every Aave borrower on 5 chains; when someone's <i>health factor</i> drops below 1.0, it flash-loan liquidates them, takes the collateral bonus, and repays the loan — profit stays in the contract.</li>
+    <li><b>The bug we found:</b> it ran overnight and caught <b>0 of ~107 real liquidations</b>. Cause: it only looked at wallets that borrowed <i>recently</i>, but the wallets that get liquidated are <i>old</i> positions. 35 of 36 Arbitrum liquidations were invisible to it.</li>
+    <li><b>The fix:</b> discover <i>every</i> borrower from each pool's deployment (not just recent), check health factors fast via Multicall3, ignore sub-$100 dust, and refuse unprofitable liquidations.</li>
+    <li><b>Right now:</b> still in <b>TEST_MODE</b> (logs, never submits). Go-live is a deliberate human decision.</li>
+  </ul>
+</div>
+
+<nav class="toc"><div class="toc-scroll">
+  <a href="#what">What it does</a>
+  <a href="#story">The bug</a>
+  <a href="#how">How it works</a>
+  <a href="#chains">Chains</a>
+  <a href="#contract">Contract</a>
+  <a href="#profit">Profitability</a>
+  <a href="#run">Run it</a>
+  <a href="#config">Config</a>
+  <a href="#files">Files</a>
+  <a href="#limits">Limits &amp; next</a>
+</div></nav>
+
+<section id="what">
+  <h2 class="sec">01 · What it does</h2>
+  <p class="lead">Aave lets people borrow against collateral. If their collateral falls (or debt grows with interest) until the loan is unsafe — a <b>health factor (HF) below 1.0</b> — anyone may repay part of the debt and seize collateral at a <b>discount (the liquidation bonus, ~5–10%)</b>. That discount is the profit. This bot competes to be that "anyone."</p>
+  <div class="grid g3">
+    <div class="card"><h4>Discover</h4><p><small>Build the list of every wallet that has borrowed, per chain, by scanning historical <code>Borrow</code> events.</small></p></div>
+    <div class="card"><h4>Watch</h4><p><small>Check each borrower's health factor continuously, focusing on those near the danger line.</small></p></div>
+    <div class="card"><h4>Strike</h4><p><small>When HF &lt; 1 and it's profitable, flash-loan the debt, liquidate, swap collateral, repay, keep the spread.</small></p></div>
+  </div>
+  <p>It runs <b>24/7</b> on a DigitalOcean droplet in Docker, across 5 EVM chains in one process, each on its own loop.</p>
+</section>
+
+<section id="story">
+  <h2 class="sec">02 · The bug — why it caught nothing</h2>
+  <div class="call bad"><b>The symptom</b>Ran overnight on 5 chains with gas funded. Caught <b>zero</b> liquidatable positions. Ground-truth scan of Aave's <code>LiquidationCall</code> events showed it wasn't bad luck: ~107 real liquidations happened that night (Arbitrum 36, Optimism 37, Base 25, Avalanche 9) — all taken by competitors.</div>
+  <h3>Root cause: looking in the wrong place</h3>
+  <p>The original discovery only scanned the <i>most recent</i> blocks of <code>Borrow</code> events. But a position becomes liquidatable as it <b>ages</b> — prices drift, interest accrues — not the moment someone borrows. So the bot's candidate list was almost entirely the wrong wallets.</p>
+  <div class="call"><b>The proof</b>Of the <b>36 wallets liquidated on Arbitrum</b> that night, only <b>1</b> was in the bot's 439-wallet candidate set. It would never have even looked at the other 35. On Plasma the window was ~2.7 hours → it knew of just 2 borrowers total.</div>
+  <h3>Three compounding problems</h3>
+  <table>
+    <thead><tr><th>Problem</th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Borrower discovery</td><td>Recent <code>Borrow</code> events only (~hours–days)</td><td>From pool <b>deployment</b>, persisted + incremental</td></tr>
+      <tr><td>Health-factor checks</td><td>Sequential, one RPC each (Base: ~17 min/cycle)</td><td>Batched via <b>Multicall3</b> + stratified (seconds)</td></tr>
+      <tr><td>What it chased</td><td>Everything, incl. sub-$1 dust</td><td><b>$100+ debt only</b> (dust = gas &gt; profit)</td></tr>
+    </tbody>
+  </table>
+  <div class="call good"><b>Bonus discovery</b>Most on-chain "liquidations" are <b>dust</b> — e.g. on Optimism, 35 of 38 were under $100 of debt (sub-$1 remainders), liquidated in bulk by MEV bots where gas barely matters. We don't want those. The real targets are the sizeable ones (Arbitrum had ~20 ≥$100 in 12h).</div>
+</section>
+
+<section id="how">
+  <h2 class="sec">03 · How it works now</h2>
+  <div class="flow">
+    <span class="step">Backfill borrowers (once)</span><span class="arr">→</span>
+    <span class="step">Incremental scan (every cycle)</span><span class="arr">→</span>
+    <span class="step">Multicall3 HF sweep</span><span class="arr">→</span>
+    <span class="step">Filter: HF&lt;1 &amp; ≥$100</span><span class="arr">→</span>
+    <span class="step">callStatic profit check</span><span class="arr">→</span>
+    <span class="step">Liquidate</span>
+  </div>
+
+  <h3>① Discovery — find every borrower, then stay current</h3>
+  <p>On first run, a <b>one-time deep backfill</b> scans <code>Borrow</code> events from the pool's deployment block forward, building the complete borrower set. It's <b>resumable</b> (checkpoints every 25 chunks, so a restart continues instead of starting over) and <b>persisted</b> to a Docker volume. After that, <b>every cycle</b> scans only the handful of new blocks since last time and merges in new borrowers — so the list is never more than seconds stale. <i>(Avalanche &amp; Optimism are capped at ~366 days because full deployment depth would take ~30h on public RPCs; that still covers every still-active borrower.)</i></p>
+
+  <h3>② Stratified health-factor sweep — fast at scale</h3>
+  <p>Checking tens of thousands of health factors every cycle doesn't scale. So:</p>
+  <ul>
+    <li><b>Every cycle:</b> re-check the <b>watchlist</b> — wallets near the danger line (HF &lt; 1.25) <i>and</i> ≥$100 debt. Small and fast.</li>
+    <li><b>Every 20 cycles:</b> a full sweep of all borrowers to refresh the watchlist.</li>
+    <li><b>Always:</b> newly-discovered borrowers are checked the same cycle they appear.</li>
+    <li>All reads go through <b>Multicall3</b> (one call = hundreds of health factors). Arbitrum's 13.8k-borrower full sweep is ~5s; watchlist cycles are ~1s.</li>
+  </ul>
+
+  <h3>③ Profitability gate — never lose money</h3>
+  <p>Two layers (defense in depth): the bot <b>simulates</b> each liquidation with <code>callStatic</code> first and skips anything that would revert; and the on-chain contract enforces a <b>minimum-profit floor</b> at the swap, so a sandwiched/bad-price fill reverts cheaply instead of selling the bonus at a loss.</p>
+</section>
+
+<section id="chains">
+  <h2 class="sec">04 · Chains &amp; live state</h2>
+  <p>All five run Aave V3. TVL figures are approximate context (Aave V3 market, as of mid-2026) — they indicate how much liquidation flow to expect. Borrower counts are live from the bot's store.</p>
+  <table>
+    <thead><tr><th>Chain</th><th>Native</th><th class="num">~Aave TVL</th><th class="num">Borrowers known</th><th>Backfill</th><th>Hardened contract</th></tr></thead>
+    <tbody>
+      <tr><td><b>Base</b></td><td>ETH</td><td class="num">~$1–2B</td><td class="num">123,753+</td><td><span class="pill wait">running</span></td><td><span class="pill ok">yes</span></td></tr>
+      <tr><td><b>Arbitrum</b></td><td>ETH</td><td class="num">~$0.7–1.5B</td><td class="num">13,810</td><td><span class="pill ok">done</span></td><td><span class="pill no">old (RPC)</span></td></tr>
+      <tr><td><b>Optimism</b></td><td>ETH</td><td class="num">~$150–300M</td><td class="num">7,877+</td><td><span class="pill wait">366d</span></td><td><span class="pill ok">yes</span></td></tr>
+      <tr><td><b>Avalanche</b></td><td>AVAX</td><td class="num">~$300–600M</td><td class="num">2,846+</td><td><span class="pill wait">366d</span></td><td><span class="pill ok">yes</span></td></tr>
+      <tr><td><b>Plasma</b></td><td>XPL</td><td class="num">small / new</td><td class="num">4,274</td><td><span class="pill ok">done</span></td><td><span class="pill ok">yes</span></td></tr>
+    </tbody>
+  </table>
+  <p class="tag">Counts climb continuously; avax/optimism were reset for the 366-day re-backfill and are re-growing.</p>
+
+  <h3>Key addresses (per chain)</h3>
+  <p>Wallet / liquidator owner (all chains): <code>0x40aBdc50e3B619D072754a767578EE2a4a4F954d</code></p>
+  <table>
+    <thead><tr><th>Chain</th><th>Aave Pool</th><th>Liquidator contract</th></tr></thead>
+    <tbody>
+      <tr><td>Plasma</td><td><code>0x925a2A72…95e12</code></td><td><code>0x81f151E5…98194</code> <span class="pill ok">hardened</span></td></tr>
+      <tr><td>Arbitrum</td><td><code>0x794a6135…814aD</code></td><td><code>0x6ba5901f…87dDC</code> <span class="pill no">old</span></td></tr>
+      <tr><td>Base</td><td><code>0xA238Dd80…d1c5</code></td><td><code>0x049DBB52…e3dC4</code> <span class="pill ok">hardened</span></td></tr>
+      <tr><td>Avalanche</td><td><code>0x794a6135…814aD</code></td><td><code>0x049DBB52…e3dC4</code> <span class="pill ok">hardened</span></td></tr>
+      <tr><td>Optimism</td><td><code>0x794a6135…814aD</code></td><td><code>0x049DBB52…e3dC4</code> <span class="pill ok">hardened</span></td></tr>
+    </tbody>
+  </table>
+  <p class="tag">Multicall3 (all chains): <code>0xcA11bde05977b3631167028862bE2a173976CA11</code>. Full addresses (debt asset, data provider, oracle, router, deployment block) live in <code>src/chains.js</code>.</p>
+</section>
+
+<section id="contract">
+  <h2 class="sec">05 · The liquidator contract</h2>
+  <p><code>AaveLiquidatorSwapRouter02.sol</code> — owner-only, holds no funds between liquidations. The flow inside one transaction:</p>
+  <div class="flow">
+    <span class="step">flashLoanSimple(debt)</span><span class="arr">→</span>
+    <span class="step">liquidationCall → receive collateral</span><span class="arr">→</span>
+    <span class="step">swap collateral → debt (V3 router)</span><span class="arr">→</span>
+    <span class="step">repay loan + premium</span><span class="arr">→</span>
+    <span class="step">keep profit</span>
+  </div>
+  <table>
+    <thead><tr><th>Function</th><th>Who</th><th>What</th></tr></thead>
+    <tbody>
+      <tr><td><code>triggerLiquidation(debt, amt, user, collat)</code></td><td>owner</td><td>Liquidate using the stored <code>minProfit</code> floor.</td></tr>
+      <tr><td><code>triggerLiquidationWithMinProfit(…, floor)</code></td><td>owner</td><td>Liquidate with a per-call (gas-aware) floor; enforces max(floor, stored).</td></tr>
+      <tr><td><code>executeOperation(…)</code></td><td>Aave pool</td><td>Flash-loan callback: does the liquidate→swap→repay, reverts if profit floor unmet.</td></tr>
+      <tr><td><code>setMinProfit(units)</code></td><td>owner</td><td>Set the stored minimum-profit floor (debt-token units).</td></tr>
+      <tr><td><code>setIntermediateTokens / setPreferredFeeTier</code></td><td>owner</td><td>Tune the collateral→debt swap routing.</td></tr>
+      <tr><td><code>withdrawToken(token, amt, to)</code></td><td>owner</td><td>Sweep accumulated profit out of the contract.</td></tr>
+    </tbody>
+  </table>
+  <div class="call warn"><b>The hardening</b>The original contract set the swap's <code>amountOutMinimum</code> to just the loan repayment — meaning MEV/slippage could siphon the <i>entire</i> bonus and the tx would still "succeed." Now it requires <code>repayment + profitFloor</code>, enforced at the swap boundary.</div>
+</section>
+
+<section id="profit">
+  <h2 class="sec">06 · How profit is protected</h2>
+  <p>Profitability isn't a single number — it's gas (varies by chain &amp; moment) vs. the bonus (a % of debt). The bot computes a floor <b>per liquidation</b>:</p>
+  <pre><span class="c">// floor (in debt-token units), enforced on-chain</span>
+floor = MIN_PROFIT_USD  +  PROFIT_SAFETY_MULTIPLE × liveGasCostUSD
+liveGasCostUSD via Aave oracle (native &amp; debt prices, 8-dp USD)</pre>
+  <p>Sample floors at current gas (defaults: $1 margin, 2× gas):</p>
+  <div class="grid g3">
+    <div class="card"><h4>Arbitrum</h4><div class="big">$1.15</div><small>gas ~$0.076</small></div>
+    <div class="card"><h4>Base</h4><div class="big">$1.05</div><small>gas ~$0.023</small></div>
+    <div class="card"><h4>Optimism</h4><div class="big">$1.01</div><small>gas ~$0.004</small></div>
+  </div>
+  <div class="call"><b>Honest note</b>The stored fallback floor is a flat <b>$2</b> placeholder; the gas-aware per-call floor above is the real mechanism (used on hardened chains). Both are tunable via env. Profit accrues inside the contract — sweep it with <code>withdrawToken</code>.</div>
+</section>
+
+<section id="run">
+  <h2 class="sec">07 · Running &amp; operating it</h2>
+  <h3>Where it lives</h3>
+  <p>DigitalOcean droplet <code>hermes-fleet-1</code> (nyc3, 2 vCPU / 4 GB), app dir <code>/opt/aave-liquidator-bot</code>, container <code>aave-liquidator</code> via Docker Compose. Borrower store persists in the named volume <code>liquidator-data</code> at <code>/app/data</code>.</p>
+  <h3>Deploy an update</h3>
+  <pre><span class="c"># from your machine — preserves the droplet's .env</span>
+rsync -az --delete --exclude .env --exclude node_modules \
+  --exclude data --exclude .git ./ \
+  root@&lt;droplet-ip&gt;:/opt/aave-liquidator-bot/
+ssh root@&lt;droplet-ip&gt; 'cd /opt/aave-liquidator-bot &amp;&amp; docker compose up -d --build'</pre>
+  <h3>Watch it</h3>
+  <pre>docker logs -f aave-liquidator                 <span class="c"># live</span>
+docker logs aave-liquidator | grep "🔥 Found"  <span class="c"># real catches</span>
+docker logs aave-liquidator | grep "BACKFILL complete"</pre>
+  <h3>Check reality (did we cover what's being liquidated?)</h3>
+  <pre>docker exec aave-liquidator node scripts/recentLiquidations.js
+docker exec aave-liquidator node scripts/probeMeaningfulCoverage.js base 100</pre>
+  <div class="call bad"><b>Going live</b>The bot only submits when <code>TEST_MODE=false</code>. That can send real transactions and spend real gas. Flip it deliberately, in the droplet <code>.env</code>, only after the profitability checks are validated. <b>It is TEST_MODE today.</b></div>
+</section>
+
+<section id="config">
+  <h2 class="sec">08 · Configuration knobs</h2>
+  <p>Set in <code>.env</code> (see <code>.env.example</code>). Per-chain overrides use a prefix, e.g. <code>BASE_BORROW_BACKFILL_BLOCKS</code>.</p>
+  <table>
+    <thead><tr><th>Variable</th><th>Default</th><th>What</th></tr></thead>
+    <tbody>
+      <tr><td><code>CHAINS</code></td><td>plasma,arbitrum,base,avalanche,optimism</td><td>Which chains to run.</td></tr>
+      <tr><td><code>TEST_MODE</code></td><td>true</td><td>true = log only; false = submit real txs.</td></tr>
+      <tr><td><code>MIN_DEBT_USD</code></td><td>100</td><td>Skip positions with less debt (dust filter).</td></tr>
+      <tr><td><code>WATCHLIST_HF</code></td><td>1.25</td><td>HF below which a wallet is re-checked every cycle.</td></tr>
+      <tr><td><code>FULL_SWEEP_EVERY_N</code></td><td>20</td><td>Cycles between full-set sweeps.</td></tr>
+      <tr><td><code>SCAN_INTERVAL_MS</code></td><td>15000</td><td>Cycle cadence.</td></tr>
+      <tr><td><code>MIN_PROFIT_USD</code> / <code>PROFIT_SAFETY_MULTIPLE</code></td><td>1 / 2</td><td>Profit floor = margin + multiple × gas.</td></tr>
+      <tr><td><code>BORROW_BACKFILL_FROM_DEPLOYMENT</code></td><td>true</td><td>Backfill from deployment (capped) vs rolling window.</td></tr>
+      <tr><td><code>PRIVATE_KEY</code></td><td>—</td><td>Wallet key (owner of all liquidators). <b>Never commit.</b></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="files">
+  <h2 class="sec">09 · Code map</h2>
+  <table>
+    <thead><tr><th>File</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>bot.js</code></td><td>Entry point. Per-chain loop, profit pre-check, submission.</td></tr>
+      <tr><td><code>aaveHelpers.js</code></td><td>Discovery (backfill + incremental), Multicall3 HF sweep, candidate filtering.</td></tr>
+      <tr><td><code>src/chains.js</code></td><td>Per-chain config: addresses, deployment blocks, oracle, caps.</td></tr>
+      <tr><td><code>src/borrowerStore.js</code></td><td>Persist borrower set + watchlist + backfill resume state.</td></tr>
+      <tr><td><code>src/multicall.js</code></td><td>Multicall3 batching helper.</td></tr>
+      <tr><td><code>src/provider.js</code> / <code>src/gas.js</code></td><td>RPC providers (with fallbacks) &amp; gas overrides.</td></tr>
+      <tr><td><code>contracts/AaveLiquidatorSwapRouter02.sol</code></td><td>The flash-loan liquidator (hardened).</td></tr>
+      <tr><td><code>scripts/recentLiquidations.js</code></td><td>Reality check: real liquidations vs our coverage + cycle times.</td></tr>
+      <tr><td><code>scripts/probeMeaningfulCoverage.js</code></td><td>Coverage of <i>sizeable</i> (≥$N) liquidations.</td></tr>
+      <tr><td><code>scripts/deployLiquidator.js</code></td><td>Deploy/verify the contract per chain.</td></tr>
+      <tr><td><code>docs/event-driven-triggers.md</code></td><td>Design for per-block / oracle-event triggers (next latency win).</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="limits">
+  <h2 class="sec">10 · Known limits &amp; what's next</h2>
+  <div class="grid g2">
+    <div class="card"><h4><span class="pill wait">open</span> Arbitrum contract</h4><p><small>Public RPCs reject the contract-creation tx. Arbitrum runs the old (unhardened) contract — still protected by the bot's callStatic gate. Needs a <b>private RPC</b> (Alchemy/Infura) to deploy the hardened one.</small></p></div>
+    <div class="card"><h4><span class="pill wait">open</span> Sizeable-coverage metric</h4><p><small>Re-measure once Avalanche/Optimism backfills finish — the proof the deep discovery worked (was ~30% at 30-day depth).</small></p></div>
+    <div class="card"><h4><span class="pill wait">idea</span> Per-block triggers</h4><p><small>React on each new block (not a 15s poll) to compete with adjacent-block MEV bots. Designed, not built. Needs private/WS RPCs.</small></p></div>
+    <div class="card"><h4><span class="pill wait">idea</span> Infra</h4><p><small>Single 2-vCPU box runs all 5 chains in one process; heavy backfills contend. Private RPCs + per-chain workers would harden throughput.</small></p></div>
+  </div>
+  <div class="call"><b>For an agent picking this up</b>Read <code>~/.claude/projects/…/memory/liquidator-discovery-flaw.md</code> and <code>liquidator-project-facts.md</code> for the full history and gotchas (e.g. the repo path has literal parens; the contract source for the old 4-chain variant is missing; deployment blocks were binary-searched). The droplet is the source of truth — inspect its container, not local state.</div>
+</section>
+
+</div>
+
+<footer><div class="wrap">
+  <span class="tag">Aave V3 Liquidator · internal field guide · generated 2026-06-02</span>
+  <p>Built &amp; documented during a review that took the bot from catching 0 of ~107 overnight liquidations to a complete-discovery, profit-gated, multi-chain liquidator. Still in TEST_MODE — go-live is a human call.</p>
+</div></footer>
+</body>
+</html>

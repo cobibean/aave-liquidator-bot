@@ -66,6 +66,12 @@ contract AaveLiquidatorSwapRouter02 {
     address public owner;
     uint256 public slippageTolerance = 0;
 
+    // Minimum profit (in the debt asset's smallest unit) a liquidation must net
+    // into this contract ABOVE the flash-loan repayment. Default 0 preserves the
+    // prior behavior until the owner sets a floor; the bot can also pass a larger
+    // per-call floor (gas-aware) via triggerLiquidationWithMinProfit.
+    uint256 public minProfit = 0;
+
     uint24[] private commonFeeTiers;
     address[] private intermediateTokens;
     mapping(address => mapping(address => uint24)) public preferredFeeTier;
@@ -74,6 +80,8 @@ contract AaveLiquidatorSwapRouter02 {
     event PreferredFeeTierSet(address indexed tokenIn, address indexed tokenOut, uint24 fee);
     event CommonFeeTiersSet(uint24[] feeTiers);
     event IntermediateTokensSet(address[] tokens);
+    event MinProfitSet(uint256 minProfit);
+    event LiquidationProfit(address indexed user, address indexed debtAsset, uint256 amountOwed, uint256 finalBalance);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -94,26 +102,66 @@ contract AaveLiquidatorSwapRouter02 {
         commonFeeTiers.push(3000);
         commonFeeTiers.push(10000);
 
-        address wrappedNative = ISwapRouter02Minimal(_swapRouter02).WETH9();
-        if (wrappedNative != address(0)) {
-            intermediateTokens.push(wrappedNative);
+        // Seed the wrapped-native intermediate IF the router exposes WETH9().
+        // Not all SwapRouter02 deployments implement it (verified: Arbitrum/Base/
+        // Avalanche/Optimism routers revert on WETH9()), so probe via a low-level
+        // staticcall and skip on failure instead of reverting construction. The
+        // owner can always add intermediates later via setIntermediateTokens().
+        (bool ok, bytes memory data) = _swapRouter02.staticcall(
+            abi.encodeWithSelector(ISwapRouter02Minimal.WETH9.selector)
+        );
+        if (ok && data.length == 32) {
+            address wrappedNative = abi.decode(data, (address));
+            if (wrappedNative != address(0)) {
+                intermediateTokens.push(wrappedNative);
+            }
         }
 
         emit OwnershipTransferred(address(0), msg.sender);
     }
 
+    function setMinProfit(uint256 _minProfit) external onlyOwner {
+        minProfit = _minProfit;
+        emit MinProfitSet(_minProfit);
+    }
+
+    // Backwards-compatible entrypoint: uses the stored `minProfit` floor.
     function triggerLiquidation(
         address debtAsset,
         uint256 debtAmount,
         address targetUser,
         address collateralAsset
     ) external onlyOwner {
+        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, minProfit);
+    }
+
+    // Profit-aware entrypoint: the bot passes a per-call minimum profit (e.g.
+    // computed from live gas cost + margin). The larger of it and the stored
+    // floor is enforced; the whole tx reverts if the floor is not met.
+    function triggerLiquidationWithMinProfit(
+        address debtAsset,
+        uint256 debtAmount,
+        address targetUser,
+        address collateralAsset,
+        uint256 minProfitForCall
+    ) external onlyOwner {
+        uint256 floor = minProfitForCall > minProfit ? minProfitForCall : minProfit;
+        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, floor);
+    }
+
+    function _triggerLiquidation(
+        address debtAsset,
+        uint256 debtAmount,
+        address targetUser,
+        address collateralAsset,
+        uint256 floor
+    ) internal {
         require(debtAsset != address(0), "debt is zero");
         require(collateralAsset != address(0), "collateral is zero");
         require(targetUser != address(0), "user is zero");
         require(debtAmount > 0, "debt amount is zero");
 
-        bytes memory params = abi.encode(targetUser, collateralAsset);
+        bytes memory params = abi.encode(targetUser, collateralAsset, floor);
         aavePool.flashLoanSimple(address(this), debtAsset, debtAmount, params, 0);
     }
 
@@ -127,32 +175,41 @@ contract AaveLiquidatorSwapRouter02 {
         require(msg.sender == address(aavePool), "caller is not pool");
         require(initiator == address(this), "bad initiator");
 
-        (address targetUser, address collateralAsset) = abi.decode(params, (address, address));
+        (address targetUser, address collateralAsset, uint256 floor) =
+            abi.decode(params, (address, address, uint256));
         _safeApprove(debtAsset, address(aavePool), debtAmount);
         aavePool.liquidationCall(collateralAsset, debtAsset, targetUser, debtAmount, false);
 
         uint256 amountOwed = debtAmount + premium;
+        // Must end with the repayment PLUS the profit floor, not just the repayment.
+        uint256 requiredBalance = amountOwed + floor;
         uint256 debtBalance = IERC20Minimal(debtAsset).balanceOf(address(this));
 
-        if (debtBalance < amountOwed && collateralAsset != debtAsset) {
+        if (debtBalance < requiredBalance && collateralAsset != debtAsset) {
             uint256 collateralBalance = IERC20Minimal(collateralAsset).balanceOf(address(this));
             require(collateralBalance > 0, "no collateral received");
 
             _safeApprove(collateralAsset, address(netSwapRouter), collateralBalance);
             bytes memory path = _resolveSwapPath(collateralAsset, debtAsset);
+            // Enforce the profit floor at the swap boundary: require the swap to
+            // return enough to cover the remaining (repayment + profit) shortfall.
+            // A sandwiched / bad-price fill then reverts cheaply instead of
+            // silently draining the liquidation bonus (the old code only required
+            // enough to repay the loan, leaving all upside exposed to MEV).
             netSwapRouter.exactInput(
                 ISwapRouter02Minimal.ExactInputParams({
                     path: path,
                     recipient: address(this),
                     amountIn: collateralBalance,
-                    amountOutMinimum: amountOwed - debtBalance
+                    amountOutMinimum: requiredBalance - debtBalance
                 })
             );
 
             debtBalance = IERC20Minimal(debtAsset).balanceOf(address(this));
         }
 
-        require(debtBalance >= amountOwed, "insufficient debt asset");
+        require(debtBalance >= requiredBalance, "profit floor not met");
+        emit LiquidationProfit(targetUser, debtAsset, amountOwed, debtBalance);
         _safeApprove(debtAsset, address(aavePool), amountOwed);
         return true;
     }

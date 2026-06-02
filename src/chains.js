@@ -33,7 +33,11 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 10_000,
     borrowScanChunkSize: 10_000,
-    borrowBackfillBlocks: 2_592_000, // ~30 days @ ~1s blocks
+    borrowBackfillBlocks: 30_000_000, // max-depth cap; > deployment depth (~23M) so Plasma backfills fully
+    deploymentBlock: 489_197, // Aave v3 Pool first code block (binary-searched)
+    priceOracle: "0x33E0b3fc976DC9C516926BA48CfC0A9E10a2aAA5",
+    wrappedNative: "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+    hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     swapRouter: "0x807F4E281B7A3B324825C64ca53c69F0b418dE40",
     swapIntermediates: ["0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"],
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
@@ -54,8 +58,12 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 300_000,
     borrowScanChunkSize: 25_000,
-    borrowBackfillBlocks: 10_368_000, // ~30 days @ ~0.25s blocks
+    borrowBackfillBlocks: 130_000_000, // max-depth cap; > deployment depth (~43M) so Arbitrum backfills fully
+    deploymentBlock: 426_768_359, // Aave v3 Pool first code block (binary-searched)
+    priceOracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7",
+    wrappedNative: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     swapRouter: "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
   },
   base: {
     key: "base",
@@ -73,8 +81,13 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 120_000,
     borrowScanChunkSize: 10_000,
-    borrowBackfillBlocks: 1_296_000, // ~30 days @ ~2s blocks
+    borrowBackfillBlocks: 50_000_000, // max-depth cap; > deployment depth (~44M) so Base backfills fully
+    deploymentBlock: 2_357_134, // Aave v3 Pool first code block (binary-searched)
+    priceOracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156",
+    wrappedNative: "0x4200000000000000000000000000000000000006",
+    hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     swapRouter: "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
   },
   optimism: {
     key: "optimism",
@@ -92,8 +105,13 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 250_000,
     borrowScanChunkSize: 5_000,
-    borrowBackfillBlocks: 1_296_000, // ~30 days @ ~2s blocks
+    borrowBackfillBlocks: 15_811_200, // ~366-day cap @ ~2s blocks (full deployment ~148M is ~30h on public RPC)
+    deploymentBlock: 4_365_693, // Aave v3 Pool first code block (binary-searched)
+    priceOracle: "0xD81eb3728a631871a7eBBaD631b5f424909f0c77",
+    wrappedNative: "0x4200000000000000000000000000000000000006",
+    hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     swapRouter: "0x4A7b5Da61326A6379179b40d00F57E5bbDC962c2",
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
   },
   linea: {
     key: "linea",
@@ -147,8 +165,13 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 40_000,
     borrowScanChunkSize: 2_000,
-    borrowBackfillBlocks: 1_296_000, // ~30 days @ ~2s blocks
+    borrowBackfillBlocks: 15_811_200, // ~366-day cap @ ~2s blocks (full deployment ~75M is ~30h on public RPC)
+    deploymentBlock: 11_970_506, // Aave v3 Pool first code block (binary-searched)
+    priceOracle: "0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C",
+    wrappedNative: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+    hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     swapRouter: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506",
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
   },
   metis: {
     key: "metis",

@@ -1,6 +1,12 @@
 const { ethers } = require('ethers');
 const fetch = require("node-fetch");
-const { loadBorrowerSet, saveBorrowerSet } = require("./src/borrowerStore");
+const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist } = require("./src/borrowerStore");
+const { aggregate3InBatches } = require("./src/multicall");
+
+// Interface used to encode/decode getUserAccountData calls for Multicall3.
+const POOL_IFACE = new ethers.utils.Interface([
+  "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
+]);
 
 const DEFAULT_SUBGRAPH_URL = "https://metisapi.0xgraph.xyz/subgraphs/name/aave/protocol-v3-metis";
 const BORROW_EVENT_ABI = [
@@ -45,6 +51,49 @@ async function mapWithConcurrency(items, concurrency, worker) {
   const limit = Math.max(1, Math.min(concurrency, items.length));
   await Promise.all(Array.from({ length: limit }, runner));
   return results;
+}
+
+// Reads health factors for many users in a few RPC round-trips via Multicall3,
+// instead of one getUserAccountData call per user. Returns [{ user, healthFactor }]
+// in input order. Users with no debt return a huge HF (Aave returns max uint256);
+// failed/undecodable calls return Infinity so they're treated as healthy/skip.
+async function getUserHealthFactorsBatched(users, provider, chainConfig = {}) {
+  const poolAddress = getPoolAddress(chainConfig);
+  if (!poolAddress || users.length === 0) {
+    return users.map((user) => ({ user, healthFactor: 999 }));
+  }
+
+  const callData = POOL_IFACE.encodeFunctionData("getUserAccountData", [users[0]]);
+  void callData; // (per-user calldata built below; this validates the signature once)
+
+  const calls = users.map((user) => ({
+    target: poolAddress,
+    allowFailure: true,
+    callData: POOL_IFACE.encodeFunctionData("getUserAccountData", [user]),
+  }));
+
+  const batchSize = parseInt(process.env.MULTICALL_BATCH_SIZE || "300", 10);
+  const raw = await aggregate3InBatches(provider, calls, batchSize);
+
+  return users.map((user, i) => {
+    const entry = raw[i];
+    if (!entry || !entry.success || !entry.returnData || entry.returnData === "0x") {
+      return { user, healthFactor: Infinity, totalDebtUsd: 0 };
+    }
+    try {
+      const decoded = POOL_IFACE.decodeFunctionResult("getUserAccountData", entry.returnData);
+      const hf = parseFloat(ethers.utils.formatUnits(decoded.healthFactor, 18));
+      // Aave v3 base currency is USD with 8 decimals (verified on-chain).
+      const totalDebtUsd = parseFloat(ethers.utils.formatUnits(decoded.totalDebtBase, 8));
+      return {
+        user,
+        healthFactor: Number.isFinite(hf) ? hf : Infinity,
+        totalDebtUsd: Number.isFinite(totalDebtUsd) ? totalDebtUsd : 0,
+      };
+    } catch (error) {
+      return { user, healthFactor: Infinity, totalDebtUsd: 0 };
+    }
+  });
 }
 
 // ABI for Aave's UI Pool Data Provider (if needed for other functions)
@@ -563,8 +612,16 @@ async function getBorrowersFromSubgraph(chainConfig = {}) {
 
 // Scans a [fromBlock, toBlock] range for Borrow events in chunks and adds
 // every borrower into `target`. Returns the number of new addresses added.
-async function scanBorrowRange(pool, fromBlock, toBlock, chunkSize, target, label) {
+// `checkpoint(lastCompletedBlock)` is called every CHECKPOINT_EVERY_CHUNKS so a
+// long backfill persists progress and can resume after an interruption.
+// `newKeys` (optional Set) collects addresses that were not already in `target`
+// — used so the caller can health-check freshly-discovered borrowers this cycle.
+async function scanBorrowRange(pool, fromBlock, toBlock, chunkSize, target, label, checkpoint, newKeys) {
     let added = 0;
+    let chunkIndex = 0;
+    const checkpointEvery = parseInt(process.env.CHECKPOINT_EVERY_CHUNKS || "25", 10);
+    const totalChunks = Math.ceil((toBlock - fromBlock + 1) / chunkSize);
+
     for (let startBlock = fromBlock; startBlock <= toBlock; startBlock += chunkSize) {
       const endBlock = Math.min(startBlock + chunkSize - 1, toBlock);
       try {
@@ -575,12 +632,22 @@ async function scanBorrowRange(pool, fromBlock, toBlock, chunkSize, target, labe
             const key = borrower.toLowerCase();
             if (!target.has(key)) {
               added++;
+              if (newKeys) newKeys.add(key);
             }
             target.add(key);
           }
         }
       } catch (error) {
         console.warn(`⚠️ ${label}: Borrow scan failed for blocks ${startBlock}-${endBlock}: ${error.message}`);
+      }
+
+      chunkIndex++;
+      if (checkpoint && chunkIndex % checkpointEvery === 0) {
+        // endBlock is fully scanned at this point; persist it as the resume point.
+        checkpoint(endBlock);
+        if (totalChunks > checkpointEvery) {
+          console.log(`   …${label}: backfill ${chunkIndex}/${totalChunks} chunks (${target.size} borrowers so far)`);
+        }
       }
     }
     return added;
@@ -605,27 +672,60 @@ async function getBorrowersFromBorrowEvents(provider, chainConfig = {}) {
     const chunkSize = chainConfig.borrowScanChunkSize || 10000;
     const chainKey = chainConfig.key || "default";
 
-    const { borrowers, lastScannedBlock } = loadBorrowerSet(chainKey);
+    const state = loadBorrowerSet(chainKey);
+    const { borrowers } = state;
 
-    let fromBlock;
-    if (lastScannedBlock && lastScannedBlock <= currentBlock) {
-      // Incremental: only the new blocks. Re-scan the last chunk too, in case
-      // the previous run stopped mid-chunk or a reorg shuffled recent blocks.
-      fromBlock = Math.max(lastScannedBlock - chunkSize, 0);
-      console.log(`🔁 ${chainConfig.name}: incremental Borrow scan ${fromBlock} → ${currentBlock} (known borrowers: ${borrowers.size}).`);
-    } else {
-      // First run (or stale/empty store): deep backfill.
-      const backfill = chainConfig.borrowBackfillBlocks || chainConfig.borrowScanBlocks || 100000;
-      fromBlock = Math.max(currentBlock - backfill, 0);
+    if (!state.backfillDone) {
+      // DEEP BACKFILL (one-time, resumable). Floor is the pool deployment block
+      // (captures ALL historical borrowers — the aged positions that actually
+      // get liquidated), BUT never deeper than borrowBackfillBlocks, which acts
+      // as a max-depth cap. On chains with very long histories + slow public RPCs
+      // (Avalanche/Optimism), a ~366-day cap finishes in minutes instead of ~30h
+      // while still covering every still-active borrower. Set
+      // BORROW_BACKFILL_FROM_DEPLOYMENT=false to ignore the deployment block entirely.
+      const fromDeployment = process.env.BORROW_BACKFILL_FROM_DEPLOYMENT !== "false";
+      const capDepth = chainConfig.borrowBackfillBlocks || chainConfig.borrowScanBlocks || 100000;
+      const windowFloor = Math.max(currentBlock - capDepth, 0);
+      const floor = (fromDeployment && Number.isFinite(chainConfig.deploymentBlock))
+        ? Math.max(chainConfig.deploymentBlock, windowFloor) // deployment, but capped to the window
+        : windowFloor;
+
+      // Resume from where a prior interrupted backfill left off.
+      const fromBlock = Number.isFinite(state.backfillCursor)
+        ? Math.max(state.backfillCursor + 1, floor)
+        : floor;
       const chunks = Math.ceil((currentBlock - fromBlock) / chunkSize);
-      console.log(`📚 ${chainConfig.name}: BACKFILL Borrow scan ${fromBlock} → ${currentBlock} (~${chunks} chunks, one-time).`);
+      const resuming = Number.isFinite(state.backfillCursor);
+      console.log(`📚 ${chainConfig.name}: ${resuming ? "RESUME" : "BACKFILL"} Borrow scan ${fromBlock} → ${currentBlock} (~${chunks} chunks, one-time).`);
+
+      const added = await scanBorrowRange(
+        pool, fromBlock, currentBlock, chunkSize, borrowers, chainConfig.name || "Aave",
+        (checkpointBlock) => saveBorrowerSet(chainKey, borrowers, null, { backfillCursor: checkpointBlock, backfillDone: false })
+      );
+      // Backfill reached head: mark done and record head as the incremental anchor.
+      saveBorrowerSet(chainKey, borrowers, currentBlock, { backfillCursor: currentBlock, backfillDone: true });
+      console.log(`✅ ${chainConfig.name}: BACKFILL complete — ${borrowers.size} known borrowers (+${added} new).`);
+      return Array.from(borrowers);
     }
 
-    const added = await scanBorrowRange(pool, fromBlock, currentBlock, chunkSize, borrowers, chainConfig.name || "Aave");
-    saveBorrowerSet(chainKey, borrowers, currentBlock);
+    // INCREMENTAL: backfill is done, only scan new blocks since last head.
+    // Re-scan the last chunk too, in case a prior run stopped mid-chunk or a
+    // reorg shuffled recent blocks.
+    const anchor = Number.isFinite(state.lastScannedBlock) ? state.lastScannedBlock : currentBlock;
+    const fromBlock = Math.max(anchor - chunkSize, 0);
+    console.log(`🔁 ${chainConfig.name}: incremental Borrow scan ${fromBlock} → ${currentBlock} (known borrowers: ${borrowers.size}).`);
+
+    const newThisScan = new Set();
+    const added = await scanBorrowRange(pool, fromBlock, currentBlock, chunkSize, borrowers, chainConfig.name || "Aave", null, newThisScan);
+    saveBorrowerSet(chainKey, borrowers, currentBlock, { backfillCursor: currentBlock, backfillDone: true });
 
     console.log(`✅ ${chainConfig.name}: ${borrowers.size} known borrowers (+${added} new this scan).`);
-    return Array.from(borrowers);
+    // Expose the freshly-discovered addresses (as a property on the returned
+    // array, so existing array callers are unaffected) so getUnhealthyPositions
+    // can health-check them THIS cycle instead of waiting for the next full sweep.
+    const result = Array.from(borrowers);
+    result.newThisScan = newThisScan;
+    return result;
 }
 
 async function getBorrowers(provider, chainConfig = {}) {
@@ -952,46 +1052,100 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     }
 
     const threshold = parseFloat(process.env.LIQUIDATION_THRESHOLD || "1.0");
-    const concurrency = parseInt(process.env.HF_CHECK_CONCURRENCY || "25", 10);
+    const watchlistHf = parseFloat(process.env.WATCHLIST_HF || "1.25");
+    const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "20", 10);
+    const minDebtUsd = parseFloat(process.env.MIN_DEBT_USD || "100");
+    const chainKey = chainConfig.key || "default";
 
-    // Phase 1: check every known borrower's health factor in parallel batches.
-    // This is the hot path — it runs every cycle over the full borrower set —
-    // so it must not be a sequential per-wallet RPC loop.
-    console.log(`✅ Checking ${borrowers.length} health factors (concurrency ${concurrency})...`);
+    // Phase 1: STRATIFIED + BATCHED health-factor sweep.
+    //
+    // Checking every borrower every cycle does not scale — a full sweep of
+    // Base's ~6.6k borrowers took ~17 min on the droplet. Instead:
+    //   - Every cycle: sweep only the "watchlist" (wallets last seen with
+    //     HF < WATCHLIST_HF) — small and fast, this is where liquidations come from.
+    //   - Every FULL_SWEEP_EVERY_N cycles (or when the watchlist is empty/first
+    //     run): sweep the full borrower set to refresh the watchlist.
+    // All reads go through Multicall3 so even the full sweep is a few RPC calls.
+    const { watch, cyclesSinceFullSweep } = loadWatchlist(chainKey);
+    const doFullSweep = watch.size === 0 || cyclesSinceFullSweep >= fullSweepEveryN;
+
+    // On a watchlist cycle, also include any borrowers discovered THIS cycle by
+    // the incremental scan — otherwise a freshly-opened risky position would not
+    // be health-checked until the next full sweep (up to FULL_SWEEP_EVERY_N cycles).
+    const newThisScan = borrowers.newThisScan instanceof Set ? borrowers.newThisScan : new Set();
+    const sweepSet = doFullSweep
+      ? borrowers
+      : borrowers.filter((b) => {
+          const key = b.toLowerCase();
+          return watch.has(key) || newThisScan.has(key);
+        });
+    if (!doFullSweep && newThisScan.size > 0) {
+      console.log(`   ↳ ${chainConfig.name}: +${newThisScan.size} newly-discovered borrower(s) added to this sweep.`);
+    }
+
+    console.log(
+      `✅ ${chainConfig.name}: ${doFullSweep ? "FULL" : "watchlist"} HF sweep of ${sweepSet.length}` +
+        ` (known ${borrowers.length}, watch ${watch.size}, cyclesSinceFull ${cyclesSinceFullSweep}).`
+    );
+
     const t0 = Date.now();
-    const hfResults = await mapWithConcurrency(borrowers, concurrency, async (user) => ({
-      user,
-      healthFactor: await getUserHealthFactor(user, provider, chainConfig),
-    }));
+    const hfResults = await getUserHealthFactorsBatched(sweepSet, provider, chainConfig);
+
+    // Rebuild the watchlist from this sweep. On a full sweep this is the new
+    // truth. On a watchlist-only sweep we keep wallets that are still near
+    // threshold (drop any that recovered) — the next full sweep re-adds new ones.
+    // Watchlist membership also requires non-dust debt (>= minDebtUsd): there's
+    // no point re-checking a $5 position every cycle when we'd never liquidate it.
+    // This keeps the hot path small even when the borrower set is huge (measured:
+    // unfiltered watchlist was 1,340 on Arbitrum; debt-filtered it is far smaller).
+    const nextWatch = new Set();
+    for (const { user, healthFactor, totalDebtUsd } of hfResults) {
+      if (Number.isFinite(healthFactor) && healthFactor < watchlistHf && totalDebtUsd >= minDebtUsd) {
+        nextWatch.add(user.toLowerCase());
+      }
+    }
+    if (!doFullSweep) {
+      // Preserve watchlist members we didn't just re-check (shouldn't happen,
+      // sweepSet == watch here, but be safe) so we don't silently forget them.
+      for (const w of watch) {
+        if (!sweepSet.includes(w) && !nextWatch.has(w)) nextWatch.add(w);
+      }
+    }
+    saveWatchlist(chainKey, nextWatch, doFullSweep ? 0 : cyclesSinceFullSweep + 1);
 
     // Keep only genuinely-unhealthy positions and attempt the most urgent
     // (lowest HF) first — those are the ones a competing bot is also racing for.
+    // Apply the USD dust floor HERE using totalDebtBase from the same sweep: most
+    // real liquidations are sub-$100 dust where gas exceeds the bonus, so we drop
+    // them before doing any expensive per-user enrichment.
     const candidates = hfResults
       .filter((entry) => Number.isFinite(entry.healthFactor) && entry.healthFactor < threshold)
+      .filter((entry) => entry.totalDebtUsd >= minDebtUsd)
       .sort((a, b) => a.healthFactor - b.healthFactor);
 
-    console.log(`✅ Scanned ${borrowers.length} HFs in ${Date.now() - t0}ms; ${candidates.length} below ${threshold}.`);
+    const belowThreshold = hfResults.filter((e) => Number.isFinite(e.healthFactor) && e.healthFactor < threshold).length;
+    console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}.`);
 
-    // Phase 2: enrich only the unhealthy candidates (debt + collateral lookups
-    // are heavier, so we do them on the short list, in priority order).
+    // Phase 2: enrich only the unhealthy, non-dust candidates (debt + collateral
+    // lookups are heavier, so we do them on the short list, in priority order).
     const minDebtToCover = parseFloat(process.env.MIN_DEBT_TO_COVER || "0.099");
     const unhealthyPositions = [];
 
-    for (const { user, healthFactor } of candidates) {
+    for (const { user, healthFactor, totalDebtUsd } of candidates) {
       const debtPosition = await getPrimaryDebtPosition(user, provider, chainConfig);
       const debtAsset = debtPosition.debtAsset;
       const debtAmount = debtPosition.debtAmount;
 
-      console.log(`👀 Checking debt for ${user}: ${ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals)} ${debtPosition.debtSymbol}`);
+      console.log(`👀 ${user}: HF ${healthFactor.toFixed(4)}, ~$${totalDebtUsd.toFixed(0)} total debt; primary ${ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals)} ${debtPosition.debtSymbol}`);
       if (debtAmount.eq(ethers.constants.Zero)) {
         console.log(`⚠️ Skipping ${user}: No remaining debt.`);
         continue;
       }
 
-      // Skip positions with debt under the configured human-unit amount.
+      // Secondary per-asset floor (token units) as a backstop.
       const debtInUnits = parseFloat(ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals));
       if (debtInUnits < minDebtToCover) {
-        console.log(`⚠️ Skipping ${user}: Debt too small (${debtInUnits} ${debtPosition.debtSymbol} < ${minDebtToCover} ${debtPosition.debtSymbol}).`);
+        console.log(`⚠️ Skipping ${user}: Debt too small (${debtInUnits} ${debtPosition.debtSymbol} < ${minDebtToCover}).`);
         continue;
       }
 
@@ -1009,6 +1163,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
         debtSymbol: debtPosition.debtSymbol,
         collateralAsset,
         healthFactor,
+        totalDebtUsd,
       });
 
       console.log(`🔥 Found liquidatable position: ${user} | HF: ${healthFactor} | Debt: ${ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals)} ${debtPosition.debtSymbol}`);
@@ -1094,6 +1249,7 @@ function getSubgraphUrl(chainConfig = {}) {
   module.exports = {
     getUnhealthyPositions,
     getUserHealthFactor,
+    getUserHealthFactorsBatched,
     getDebtAmount,
     getDebtPosition,
     getDebtPositions,
