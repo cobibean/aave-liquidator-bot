@@ -99,7 +99,15 @@ async function handleChain(chainConfig) {
       return result;
     }
 
-    const overrides = await getTransactionOverrides(provider, chainConfig, { gasLimit });
+    // Deploys are NOT competitive same-block txs, so use legacy (base) gas rather
+    // than the liquidation EIP-1559 priority bid. The priority bid (PRIORITY_FEE_
+    // MULTIPLE × networkTip) inflates maxFeePerGas to ~2+ gwei, and the node's
+    // intrinsic-cost guard (gasLimit × maxFeePerGas) can then exceed a thin gas
+    // balance even though the actual deploy costs a fraction of that. Legacy mode
+    // pays the real base price (e.g. ~0.006 gwei on Base). Set DEPLOY_USE_1559=true
+    // to opt back into the priority path.
+    const useLegacyGas = process.env.DEPLOY_USE_1559 !== "true";
+    const overrides = await getTransactionOverrides(provider, chainConfig, { gasLimit, legacy: useLegacyGas });
     const contract = await factory.deploy(chainConfig.pool, result.router, overrides);
     result.deployTxHash = contract.deployTransaction.hash;
     result.deployedAddress = contract.address;
@@ -117,6 +125,7 @@ async function handleChain(chainConfig) {
     if (chainConfig.swapIntermediates?.length && contract.interface.functions["setIntermediateTokens(address[])"]) {
       const setIntermediatesOverrides = await getTransactionOverrides(provider, chainConfig, {
         gasLimit: 200_000,
+        legacy: useLegacyGas,
       });
       const setIntermediatesTx = await contract.setIntermediateTokens(
         chainConfig.swapIntermediates,

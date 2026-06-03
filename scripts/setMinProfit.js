@@ -7,9 +7,12 @@ const ABI = ["function setMinProfit(uint256) external","function minProfit() vie
 
 // Sets a conservative stored minProfit floor (in debt-asset smallest units).
 // Debt assets are 6-decimal USD stables here, so $2 = 2_000_000.
+// Addresses of the contracts to set the floor on. Override a single chain's
+// target via <CHAIN>_LIQUIDATOR_OVERRIDE env (used during the V3 redeploy so we
+// point at the NEW per-chain contract without editing this file each time).
 const NEW = {
   plasma: "0x81f151E54B9578337f95bb84C821b96A73E98194",
-  base: "0x049DBB52c1fdf75362Abf4cf2B1e13F82c0e3dC4",
+  base: process.env.BASE_LIQUIDATOR_OVERRIDE || "0x81f151E54B9578337f95bb84C821b96A73E98194", // V3 path-aware redeploy 2026-06-03
   avalanche: "0x049DBB52c1fdf75362Abf4cf2B1e13F82c0e3dC4",
   optimism: "0x049DBB52c1fdf75362Abf4cf2B1e13F82c0e3dC4",
 };
@@ -25,7 +28,9 @@ const FLOOR = process.env.SET_MIN_PROFIT_UNITS || "2000000"; // $2 at 6 decimals
     const k = new ethers.Contract(addr, ABI, wallet);
     try {
       const before = (await k.minProfit()).toString();
-      const overrides = await getTransactionOverrides(p, c, { gasLimit: 80000 });
+      // Non-competitive admin tx — use legacy (base) gas, not the liquidation
+      // priority bid (which can trip the intrinsic-cost guard on a thin balance).
+      const overrides = await getTransactionOverrides(p, c, { gasLimit: 80000, legacy: process.env.DEPLOY_USE_1559 !== "true" });
       const tx = await k.setMinProfit(FLOOR, overrides);
       const rc = await tx.wait();
       const after = (await k.minProfit()).toString();

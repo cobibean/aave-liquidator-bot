@@ -9,6 +9,7 @@ const {
   enrichCandidateBatched,
   getReservesListCached,
   resolveChainMinDebtUsd,
+  resolveSwapPath,
 } = require("./aaveHelpers");
 const { getSelectedChainConfigs } = require("./src/chains");
 const { getTransactionOverrides } = require("./src/gas");
@@ -241,9 +242,19 @@ function delay(ms) {
 // This is the bot-side half of the profitability gate; the hardened contract's
 // minProfit floor is the on-chain half. Works against both the current and
 // hardened contract (both expose triggerLiquidation with the same signature).
-async function simulateLiquidation(contract, { debtAsset, debtToCover, user, collateralAsset, provider, chainConfig, gasPrice }) {
+async function simulateLiquidation(contract, { debtAsset, debtToCover, user, collateralAsset, provider, chainConfig, gasPrice, swapPath }) {
+  // Mirror the entrypoint we'll actually broadcast so the callStatic gate is a
+  // true freshness/profitability check. On path-aware chains with a resolved
+  // path, simulate triggerLiquidationWithPath (floor 0 keeps the gate purely
+  // about whether the swap+repay path works; the real floor is enforced at send).
+  const usePath = !!swapPath && swapPath !== "0x" && chainConfig.pathAware &&
+    contract.callStatic.triggerLiquidationWithPath;
   try {
-    await contract.callStatic.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset);
+    if (usePath) {
+      await contract.callStatic.triggerLiquidationWithPath(debtAsset, debtToCover, user, collateralAsset, 0, swapPath);
+    } else {
+      await contract.callStatic.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset);
+    }
   } catch (error) {
     const reason = error.reason || error.errorName || error.error?.message || error.message || "revert";
     return { ok: false, reason: String(reason).slice(0, 160) };
@@ -255,7 +266,9 @@ async function simulateLiquidation(contract, { debtAsset, debtToCover, user, col
   let estGasCostNative = null;
   try {
     const [gasEstimate, livePrice] = await Promise.all([
-      contract.estimateGas.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset),
+      usePath
+        ? contract.estimateGas.triggerLiquidationWithPath(debtAsset, debtToCover, user, collateralAsset, 0, swapPath)
+        : contract.estimateGas.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset),
       gasPrice ? Promise.resolve(gasPrice) : provider.getGasPrice(),
     ]);
     estGasCostNative = ethers.utils.formatEther(gasEstimate.mul(livePrice));
@@ -350,6 +363,19 @@ async function attemptLiquidation({
     // leave null; helpers will fetch their own.
   }
 
+  // Resolve the V3 swap path off-chain (3.3) on path-aware chains, so both the
+  // callStatic gate and the broadcast can pass it in calldata (skips the
+  // contract's on-chain getPool fee-tier discovery). "0x" / failure ⇒ contract
+  // self-resolves, so this never regresses. Collateral==debt needs no swap.
+  let swapPath = "0x";
+  if (chainConfig.pathAware && collateralAsset.toLowerCase() !== debtAsset.toLowerCase()) {
+    try {
+      swapPath = await resolveSwapPath(provider, chainConfig, collateralAsset, debtAsset);
+    } catch (_) {
+      swapPath = "0x"; // fall back to on-chain resolution
+    }
+  }
+
   // PROFITABILITY PRE-CHECK (defense-in-depth, part 1 of 2).
   // Simulate the whole flash-loan → liquidationCall → swap → repay path with
   // callStatic before spending any gas. If it reverts, the liquidation is not
@@ -365,6 +391,7 @@ async function attemptLiquidation({
     provider,
     chainConfig,
     gasPrice: sharedGasPrice,
+    swapPath,
   });
   if (!profitCheck.ok) {
     console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${profitCheck.reason}).`);
@@ -426,6 +453,21 @@ async function attemptLiquidation({
 
     // A function so we can pick the right entrypoint once and reuse it.
     const broadcast = () => {
+      // Path-aware (3.3): pass the off-chain-resolved V3 path so the contract
+      // skips on-chain getPool discovery. Only on chains whose deployed contract
+      // supports it (pathAware) and when we actually resolved a path; else fall
+      // through to the min-profit / 4-arg entrypoints below (empty path == old).
+      if (
+        chainConfig.pathAware &&
+        swapPath && swapPath !== "0x" &&
+        minProfitUnits &&
+        aaveLiquidatorContract.triggerLiquidationWithPath
+      ) {
+        console.log(`   ${chainConfig.name}: min-profit floor ${ethers.utils.formatUnits(minProfitUnits, debtDecimals)} ${debtSymbol} (path-in-calldata)`);
+        return aaveLiquidatorContract.triggerLiquidationWithPath(
+          debtAsset, debtToCover, user, collateralAsset, minProfitUnits, swapPath, overrides
+        );
+      }
       if (chainConfig.hardenedLiquidator && minProfitUnits && aaveLiquidatorContract.triggerLiquidationWithMinProfit) {
         console.log(`   ${chainConfig.name}: min-profit floor ${ethers.utils.formatUnits(minProfitUnits, debtDecimals)} ${debtSymbol}`);
         return aaveLiquidatorContract.triggerLiquidationWithMinProfit(

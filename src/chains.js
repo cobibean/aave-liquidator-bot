@@ -62,9 +62,13 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 426_768_359, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7",
     wrappedNative: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    swapRouter: "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+    // Uniswap V3 SwapRouter02 (factory 0x1F98431c8aD98523631AE4a59f267346ea31F984).
+    // Was a SushiSwap V2 router (0x1b02dA8C…) — the V3-only contract's swap reverted.
+    // 100% real-collateral V3 coverage verified (scripts/probeCollateralVenues.js).
+    swapRouter: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
     hardenedLiquidator: true, // hardened contract deployed 2026-06-02 (via private RPC)
+    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
   },
   base: {
     key: "base",
@@ -87,8 +91,12 @@ const CHAIN_CONFIGS = {
     priceOracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156",
     wrappedNative: "0x4200000000000000000000000000000000000006",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
-    swapRouter: "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
+    // Uniswap V3 SwapRouter02 (factory 0x33128a8fC17869897dcE68Ed026d694621f6FDfD).
+    // Was a V2 router (0x4752ba5d…) — the V3-only contract's swap reverted.
+    // 100% real-collateral V3 coverage verified (scripts/probeCollateralVenues.js).
+    swapRouter: "0x2626664c2603336E57B271c5C0b26F421741e481",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    pathAware: true, // V3 path-aware contract 0x81f151E5… deployed 2026-06-03
   },
   optimism: {
     key: "optimism",
@@ -111,8 +119,12 @@ const CHAIN_CONFIGS = {
     priceOracle: "0xD81eb3728a631871a7eBBaD631b5f424909f0c77",
     wrappedNative: "0x4200000000000000000000000000000000000006",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
-    swapRouter: "0x4A7b5Da61326A6379179b40d00F57E5bbDC962c2",
+    // Uniswap V3 SwapRouter02 (factory 0x1F98431c8aD98523631AE4a59f267346ea31F984).
+    // Was a V2 router (0x4A7b5Da6…) — the V3-only contract's swap reverted.
+    // 100% real-collateral V3 coverage verified (scripts/probeCollateralVenues.js).
+    swapRouter: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
   },
   linea: {
     key: "linea",
@@ -171,8 +183,12 @@ const CHAIN_CONFIGS = {
     priceOracle: "0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C",
     wrappedNative: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
-    swapRouter: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506",
+    // Uniswap V3 SwapRouter02 (factory 0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD).
+    // Was a SushiSwap V2 router (0x1b02da8c…) — the V3-only contract's swap reverted.
+    // ~99% real-collateral V3 coverage verified (only WETH.e→GHO lacks a path).
+    swapRouter: "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
   },
   metis: {
     key: "metis",

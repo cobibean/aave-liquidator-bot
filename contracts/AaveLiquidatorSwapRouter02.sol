@@ -125,19 +125,21 @@ contract AaveLiquidatorSwapRouter02 {
         emit MinProfitSet(_minProfit);
     }
 
-    // Backwards-compatible entrypoint: uses the stored `minProfit` floor.
+    // Backwards-compatible entrypoint: uses the stored `minProfit` floor and lets
+    // the contract resolve the swap path on-chain (empty path).
     function triggerLiquidation(
         address debtAsset,
         uint256 debtAmount,
         address targetUser,
         address collateralAsset
     ) external onlyOwner {
-        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, minProfit);
+        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, minProfit, "");
     }
 
     // Profit-aware entrypoint: the bot passes a per-call minimum profit (e.g.
     // computed from live gas cost + margin). The larger of it and the stored
-    // floor is enforced; the whole tx reverts if the floor is not met.
+    // floor is enforced; the whole tx reverts if the floor is not met. Swap path
+    // is resolved on-chain (empty path).
     function triggerLiquidationWithMinProfit(
         address debtAsset,
         uint256 debtAmount,
@@ -146,7 +148,27 @@ contract AaveLiquidatorSwapRouter02 {
         uint256 minProfitForCall
     ) external onlyOwner {
         uint256 floor = minProfitForCall > minProfit ? minProfitForCall : minProfit;
-        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, floor);
+        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, floor, "");
+    }
+
+    // Path-aware entrypoint (task 3.3): the bot resolves the V3 swap path
+    // off-chain and passes it in calldata, so executeOperation skips the on-chain
+    // getPool() fee-tier discovery (several external calls inside the gas-metered
+    // tx). `swapPath` is the standard Uniswap V3 packed path
+    // (tokenIn|fee|tokenOut, or tokenIn|fee1|mid|fee2|tokenOut). An EMPTY path
+    // falls back to on-chain resolution, so a stale/failed off-chain resolve is
+    // never worse than the old behavior. The profit floor is still enforced at
+    // the swap boundary (amountOutMinimum), so a bogus path just reverts cheaply.
+    function triggerLiquidationWithPath(
+        address debtAsset,
+        uint256 debtAmount,
+        address targetUser,
+        address collateralAsset,
+        uint256 minProfitForCall,
+        bytes calldata swapPath
+    ) external onlyOwner {
+        uint256 floor = minProfitForCall > minProfit ? minProfitForCall : minProfit;
+        _triggerLiquidation(debtAsset, debtAmount, targetUser, collateralAsset, floor, swapPath);
     }
 
     function _triggerLiquidation(
@@ -154,14 +176,15 @@ contract AaveLiquidatorSwapRouter02 {
         uint256 debtAmount,
         address targetUser,
         address collateralAsset,
-        uint256 floor
+        uint256 floor,
+        bytes memory swapPath
     ) internal {
         require(debtAsset != address(0), "debt is zero");
         require(collateralAsset != address(0), "collateral is zero");
         require(targetUser != address(0), "user is zero");
         require(debtAmount > 0, "debt amount is zero");
 
-        bytes memory params = abi.encode(targetUser, collateralAsset, floor);
+        bytes memory params = abi.encode(targetUser, collateralAsset, floor, swapPath);
         aavePool.flashLoanSimple(address(this), debtAsset, debtAmount, params, 0);
     }
 
@@ -175,8 +198,8 @@ contract AaveLiquidatorSwapRouter02 {
         require(msg.sender == address(aavePool), "caller is not pool");
         require(initiator == address(this), "bad initiator");
 
-        (address targetUser, address collateralAsset, uint256 floor) =
-            abi.decode(params, (address, address, uint256));
+        (address targetUser, address collateralAsset, uint256 floor, bytes memory swapPath) =
+            abi.decode(params, (address, address, uint256, bytes));
         _safeApprove(debtAsset, address(aavePool), debtAmount);
         aavePool.liquidationCall(collateralAsset, debtAsset, targetUser, debtAmount, false);
 
@@ -190,7 +213,13 @@ contract AaveLiquidatorSwapRouter02 {
             require(collateralBalance > 0, "no collateral received");
 
             _safeApprove(collateralAsset, address(netSwapRouter), collateralBalance);
-            bytes memory path = _resolveSwapPath(collateralAsset, debtAsset);
+            // Use the off-chain-resolved path when supplied (task 3.3); else fall
+            // back to on-chain getPool() fee-tier discovery. A supplied path must
+            // still start at the collateral and end at the debt asset, otherwise
+            // the swap won't produce the debt token and the floor check reverts.
+            bytes memory path = swapPath.length > 0
+                ? swapPath
+                : _resolveSwapPath(collateralAsset, debtAsset);
             // Enforce the profit floor at the swap boundary: require the swap to
             // return enough to cover the remaining (repayment + profit) shortfall.
             // A sandwiched / bad-price fill then reverts cheaply instead of

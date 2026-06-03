@@ -1551,8 +1551,123 @@ function resolveChainMinDebtUsd(chainConfig = {}) {
     return 100;
 }
   
+// ---------------------------------------------------------------------------
+// Off-chain V3 swap-path resolver (task 3.3)
+//
+// Builds the standard packed V3 path the contract's exactInput consumes: a DIRECT
+// pool across the common fee tiers [100,500,3000,10000], else a 2-HOP via each
+// intermediate (the contract seeds wrappedNative; the deploy script adds
+// chainConfig.swapIntermediates). Returns packed bytes
+// (tokenIn|fee|tokenOut or tokenIn|fee1|mid|fee2|tokenOut), or "0x" if no path is
+// found (caller then lets the contract self-resolve / skips).
+//
+// IMPORTANT: this is STRICTLY BETTER than the contract's on-chain _findFeeTier,
+// which returns the FIRST tier where getPool != 0 — even if that pool has ZERO
+// liquidity (verified on Base: e.g. cbETH/USDC, weETH/USDC, WETH/GHO all have an
+// empty 100bps pool, so the on-chain path would route through a dead pool and
+// revert). Off-chain we additionally read pool.liquidity() and pick the tier with
+// the MOST current-tick liquidity, skipping empty pools. Passing this path in
+// calldata is what makes those liquidations executable at all. The contract still
+// enforces the profit floor at amountOutMinimum, so a path that can't fill the
+// size reverts cheaply.
+//
+// Read-only; results cached per (chain, tokenIn, tokenOut). The factory is read
+// once per chain from the configured swapRouter.
+// ---------------------------------------------------------------------------
+const V3_FACTORY_IFACE = new ethers.utils.Interface([
+  "function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)",
+]);
+const V3_POOL_LIQ_IFACE = new ethers.utils.Interface([
+  "function liquidity() view returns (uint128)",
+]);
+const ROUTER_FACTORY_IFACE = new ethers.utils.Interface([
+  "function factory() view returns (address)",
+]);
+const COMMON_FEE_TIERS = [100, 500, 3000, 10000]; // matches contract constructor
+const factoryAddrCache = new Map(); // chainKey -> factory address (or null)
+const poolFeeCache = new Map(); // `${chainKey}:${a}:${b}` -> fee (0 = none, cached)
+
+async function getRouterFactory(provider, chainConfig) {
+  const key = chainConfig.key || "default";
+  if (factoryAddrCache.has(key)) return factoryAddrCache.get(key);
+  let factory = null;
+  try {
+    const router = new ethers.Contract(chainConfig.swapRouter, ROUTER_FACTORY_IFACE, provider);
+    factory = await router.factory();
+  } catch (_) {
+    factory = null;
+  }
+  factoryAddrCache.set(key, factory);
+  return factory;
+}
+
+// Returns the common fee tier whose pool has the MOST current-tick liquidity for
+// (a,b) — skipping tiers with no pool or zero liquidity — or 0 if none usable.
+async function findFeeTier(provider, chainConfig, factory, a, b) {
+  const key = `${chainConfig.key || "default"}:${a.toLowerCase()}:${b.toLowerCase()}`;
+  if (poolFeeCache.has(key)) return poolFeeCache.get(key);
+  const f = new ethers.Contract(factory, V3_FACTORY_IFACE, provider);
+  let bestFee = 0;
+  let bestLiq = ethers.constants.Zero;
+  for (const fee of COMMON_FEE_TIERS) {
+    let pool;
+    try {
+      pool = await f.getPool(a, b, fee);
+    } catch (_) {
+      // V2 factory or unsupported selector — treat as no pool at this tier.
+      continue;
+    }
+    if (!pool || pool === ethers.constants.AddressZero) continue;
+    let liq;
+    try {
+      liq = await new ethers.Contract(pool, V3_POOL_LIQ_IFACE, provider).liquidity();
+    } catch (_) {
+      continue; // not a readable V3 pool
+    }
+    if (liq.gt(bestLiq)) { bestLiq = liq; bestFee = fee; }
+  }
+  poolFeeCache.set(key, bestFee);
+  return bestFee;
+}
+
+function packPath(parts) {
+  // parts: [token, fee, token, fee, token, ...] — tokens as 20-byte addrs, fees
+  // as uint24. ethers.utils.solidityPack == abi.encodePacked.
+  const types = parts.map((_, i) => (i % 2 === 0 ? "address" : "uint24"));
+  return ethers.utils.solidityPack(types, parts);
+}
+
+// Resolve the packed V3 path for collateral->debt. Returns "0x" if unresolved.
+async function resolveSwapPath(provider, chainConfig, tokenIn, tokenOut) {
+  if (!tokenIn || !tokenOut || tokenIn.toLowerCase() === tokenOut.toLowerCase()) return "0x";
+  const factory = await getRouterFactory(provider, chainConfig);
+  if (!factory) return "0x";
+
+  const directFee = await findFeeTier(provider, chainConfig, factory, tokenIn, tokenOut);
+  if (directFee !== 0) return packPath([tokenIn, directFee, tokenOut]);
+
+  // 2-hop via intermediates: contract seeds wrappedNative, deploy adds
+  // swapIntermediates. Dedupe and skip if intermediate == in/out (contract does).
+  const intermediates = [];
+  for (const t of [chainConfig.wrappedNative, ...(chainConfig.swapIntermediates || [])]) {
+    if (!t) continue;
+    const lc = t.toLowerCase();
+    if (lc === tokenIn.toLowerCase() || lc === tokenOut.toLowerCase()) continue;
+    if (!intermediates.some((x) => x.toLowerCase() === lc)) intermediates.push(t);
+  }
+  for (const mid of intermediates) {
+    const firstFee = await findFeeTier(provider, chainConfig, factory, tokenIn, mid);
+    if (firstFee === 0) continue;
+    const secondFee = await findFeeTier(provider, chainConfig, factory, mid, tokenOut);
+    if (secondFee === 0) continue;
+    return packPath([tokenIn, firstFee, mid, secondFee, tokenOut]);
+  }
+  return "0x";
+}
+
   module.exports = {
     getUnhealthyPositions,
+    resolveSwapPath,
     getUserHealthFactor,
     getUserHealthFactorsBatched,
     sweepHealthFactorsStreaming,
