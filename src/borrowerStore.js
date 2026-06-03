@@ -17,6 +17,10 @@ function watchlistPath(chainKey) {
   return path.join(DATA_DIR, `watchlist-${chainKey}.json`);
 }
 
+function activeDebtPath(chainKey) {
+  return path.join(DATA_DIR, `active-debt-${chainKey}.json`);
+}
+
 function ensureDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -103,10 +107,52 @@ function saveWatchlist(chainKey, watch, cyclesSinceFullSweep) {
   fs.renameSync(tmpPath, finalPath);
 }
 
+// Active-debt index = the subset of known borrowers observed carrying debt
+// (totalDebtBase > 0) in the last cold sweep, plus newly-discovered borrowers.
+// The expensive "full" health-factor sweep iterates THIS set instead of every
+// ever-borrowed wallet (Base: ~few thousand with debt vs ~210k ever-borrowed),
+// which is what keeps the full sweep fast enough to run often. A periodic cold
+// sweep of the entire borrower set rebuilds it to catch wallets that took on
+// debt without re-emitting a Borrow event we'd otherwise see incrementally.
+//   warmSweepsSinceCold — how many warm (active-debt) sweeps since the last cold
+//     (all-borrower) sweep; drives when the next cold sweep is due.
+function loadActiveDebt(chainKey) {
+  try {
+    const raw = fs.readFileSync(activeDebtPath(chainKey), "utf-8");
+    const parsed = JSON.parse(raw);
+    return {
+      active: new Set((parsed.active || []).map((a) => a.toLowerCase())),
+      warmSweepsSinceCold: Number.isFinite(parsed.warmSweepsSinceCold) ? parsed.warmSweepsSinceCold : 0,
+    };
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`⚠️ Failed to read active-debt index for ${chainKey}: ${error.message}`);
+    }
+    return { active: new Set(), warmSweepsSinceCold: 0 };
+  }
+}
+
+function saveActiveDebt(chainKey, active, warmSweepsSinceCold) {
+  ensureDir();
+  const payload = {
+    chainKey,
+    updatedAt: new Date().toISOString(),
+    warmSweepsSinceCold,
+    count: active.size,
+    active: Array.from(active),
+  };
+  const finalPath = activeDebtPath(chainKey);
+  const tmpPath = `${finalPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(payload));
+  fs.renameSync(tmpPath, finalPath);
+}
+
 module.exports = {
   DATA_DIR,
   loadBorrowerSet,
   saveBorrowerSet,
   loadWatchlist,
   saveWatchlist,
+  loadActiveDebt,
+  saveActiveDebt,
 };

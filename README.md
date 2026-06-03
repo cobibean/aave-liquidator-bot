@@ -162,6 +162,67 @@ The bot outputs detailed logs showing:
 - Execution of liquidations
 - Profits from successful liquidations
 
+### Private monitor dashboard
+
+This repo includes a small Express dashboard in `monitor/` for a human-readable
+operator view. It summarizes the `aave-liquidator` Docker container, recent bot
+logs, liquidation activity, per-chain borrower progress, and warnings. Raw logs
+are hidden on initial page load and are fetched only when the Raw logs controls
+are used.
+
+Security model:
+
+- The dashboard is designed for private Tailscale access only.
+- Docker Compose binds it to `127.0.0.1:8787` on the droplet by default.
+- Do not expose it with public Tailscale Funnel or an unauthenticated public
+  reverse proxy.
+- The monitor mounts `/var/run/docker.sock` to inspect the bot container and
+  read Docker logs. Docker socket access is powerful host access even when the
+  mount is marked read-only.
+- The Compose service runs the monitor container as root so it can read the
+  Docker socket on typical Linux hosts. Treat access to the dashboard as access
+  to a privileged operational surface.
+- The bot data volume is mounted read-only at `/bot-data`.
+- The monitor only reports whitelisted env values: `TEST_MODE` and `CHAINS`.
+  It never returns the full container environment.
+- Log output is redacted before returning from the API, but redaction is a
+  safety net, not a reason to expose the dashboard publicly.
+
+Run locally:
+
+```bash
+npm install --prefix monitor
+npm run monitor:start
+```
+
+Open `http://127.0.0.1:8787`. If Docker or the bot container is unavailable, the
+monitor starts anyway and shows degraded or missing-container status.
+
+Run tests for the monitor:
+
+```bash
+npm run monitor:test
+```
+
+Run on the droplet with Docker Compose:
+
+```bash
+cd /opt/aave-liquidator-bot
+docker compose up -d --build liquidator-monitor
+docker compose ps liquidator-monitor
+curl http://127.0.0.1:8787/api/health
+curl http://127.0.0.1:8787/api/status
+```
+
+Expose privately with Tailscale Serve:
+
+```bash
+tailscale serve --bg --https=443 127.0.0.1:8787
+tailscale serve status
+```
+
+Do not enable Tailscale Funnel for this service.
+
 ## Security Considerations
 
 Please refer to the [SECURITY.md](SECURITY.md) file for important security information.

@@ -9,6 +9,8 @@
     "deploy:liquidator": "node scripts/deployLiquidator.js",
     "preflight:liquidation": "node scripts/liquidationPreflight.js",
     "droplet:room": "node scripts/checkDropletRoom.js",
+    "monitor:start": "npm start --prefix monitor",
+    "monitor:test": "npm test --prefix monitor",
     "test": "npm run smoke:chains"
   },
   "keywords": [],

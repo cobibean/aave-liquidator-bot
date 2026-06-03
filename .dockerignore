@@ -1,8 +1,12 @@
 .git
 .env
 .local-logs
+.playwright-cli
 .bot-test-loop.pid
 node_modules
+monitor/node_modules
+monitor/coverage
+data
 npm-debug.log
 *.log
 digitalocean

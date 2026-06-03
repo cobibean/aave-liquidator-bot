@@ -1,0 +1,13 @@
+2026-06-03T15:00:00.000000000Z Starting Aave Liquidator Bot on Base, Avalanche C-Chain...
+2026-06-03T15:00:01.000000000Z Base: COLD HF sweep of 210921 (known 210921, active-debt 0, watch 0, cyclesSinceFull 20, warmSinceCold 8).
+2026-06-03T15:15:03.000000000Z Base: swept 210921 HFs in 902000ms; 0 below 1, 0 above $100 debt; watchlist now 0.
+2026-06-03T15:15:04.000000000Z Base: Found 0 liquidatable positions (cycle 903000ms).
+2026-06-03T15:15:05.000000000Z Avalanche C-Chain: incremental Borrow scan 100 -> 200 (known borrowers: 523).
+2026-06-03T15:15:06.000000000Z Avalanche C-Chain: 523 known borrowers (+1 new this scan).
+2026-06-03T15:15:07.000000000Z Avalanche C-Chain: WARM HF sweep of 523 (known 523, active-debt 500, watch 3, cyclesSinceFull 20, warmSinceCold 2).
+2026-06-03T15:15:08.000000000Z Avalanche C-Chain: swept 523 HFs in 4100ms; 2 below 1, 2 above $10 debt; watchlist now 4.
+2026-06-03T15:15:09.000000000Z Avalanche C-Chain: Found 2 liquidatable positions (cycle 4300ms).
+2026-06-03T15:15:10.000000000Z Attempting liquidation with:
+2026-06-03T15:15:11.000000000Z TX sent: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-06-03T15:15:12.000000000Z Successful liquidation: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-06-03T15:15:13.000000000Z Arbitrum One: Error in main loop: RPC timeout token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN

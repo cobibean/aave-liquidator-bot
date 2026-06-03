@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aave Liquidator Monitor</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Private operator dashboard</p>
+        <h1>Aave Liquidator Monitor</h1>
+      </div>
+      <div class="refresh">
+        <span id="refresh-label">Waiting for status</span>
+        <button id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-grid" aria-label="Overall status">
+        <article class="card hero-card">
+          <div class="card-label">Overall status</div>
+          <div class="status-line">
+            <span id="bot-dot" class="dot dot-muted"></span>
+            <strong id="bot-status">Checking bot status</strong>
+          </div>
+          <p id="bot-subtitle" class="muted">The monitor is loading a summarized view.</p>
+        </article>
+
+        <article class="card">
+          <div class="card-label">Mode</div>
+          <div id="mode-value" class="metric">Unknown</div>
+          <p id="mode-caption" class="muted">Only TEST_MODE is shown.</p>
+        </article>
+
+        <article class="card">
+          <div class="card-label">Restarts</div>
+          <div id="restart-value" class="metric">-</div>
+          <p id="uptime-value" class="muted">Uptime unavailable</p>
+        </article>
+
+        <article class="card">
+          <div class="card-label">Last log</div>
+          <div id="last-log-value" class="metric">-</div>
+          <p id="last-refresh-value" class="muted">No refresh yet</p>
+        </article>
+      </section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Activity summary</p>
+          <h2>Recent bot progress</h2>
+        </div>
+        <span id="activity-window" class="pill">12h window</span>
+      </section>
+
+      <section class="metrics-grid" aria-label="Liquidation activity summary">
+        <article class="mini-card">
+          <span>Liquidatable detections</span>
+          <strong id="metric-detections">0</strong>
+        </article>
+        <article class="mini-card">
+          <span>Liquidation attempts</span>
+          <strong id="metric-attempts">0</strong>
+        </article>
+        <article class="mini-card">
+          <span>Transactions sent</span>
+          <strong id="metric-txs">0</strong>
+        </article>
+        <article class="mini-card">
+          <span>Successful liquidations</span>
+          <strong id="metric-success">0</strong>
+        </article>
+        <article class="mini-card">
+          <span>Failed or reverted txs</span>
+          <strong id="metric-failed">0</strong>
+        </article>
+        <article class="mini-card">
+          <span>Main-loop errors</span>
+          <strong id="metric-errors">0</strong>
+        </article>
+      </section>
+
+      <section class="card event-card">
+        <div class="card-label">Newest notable event</div>
+        <p id="newest-event">No notable events in the recent window.</p>
+      </section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Progress by chain</p>
+          <h2>Borrower scans and health checks</h2>
+        </div>
+      </section>
+      <section id="chains" class="chain-grid" aria-live="polite"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Attention</p>
+          <h2>Warnings</h2>
+        </div>
+      </section>
+      <section id="warnings" class="warnings"></section>
+
+      <details id="raw-logs-panel" class="raw-panel">
+        <summary>
+          <span>Raw logs hidden</span>
+          <small>Open this only when you need the original Docker log lines.</small>
+        </summary>
+        <div class="raw-controls">
+          <label>
+            Window
+            <select id="logs-since">
+              <option value="15m">15m</option>
+              <option value="1h" selected>1h</option>
+              <option value="6h">6h</option>
+              <option value="12h">12h</option>
+              <option value="24h">24h</option>
+            </select>
+          </label>
+          <label>
+            Filter
+            <input id="logs-filter" type="search" placeholder="Optional text">
+          </label>
+          <label>
+            Max lines
+            <input id="logs-limit" type="number" min="1" max="2000" value="500">
+          </label>
+          <button id="load-logs" type="button">Load raw logs</button>
+          <button id="download-logs" type="button">Download logs</button>
+        </div>
+        <pre id="raw-logs" class="raw-output" aria-live="polite">Raw logs are not loaded by default.</pre>
+      </details>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

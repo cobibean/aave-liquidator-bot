@@ -18,5 +18,29 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  liquidator-monitor:
+    build:
+      context: .
+      dockerfile: monitor/Dockerfile
+    container_name: liquidator-monitor
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      MONITOR_HOST: "0.0.0.0"
+      MONITOR_PORT: "8787"
+      MONITOR_BOT_CONTAINER: "${MONITOR_BOT_CONTAINER:-aave-liquidator}"
+      MONITOR_BORROWER_DATA_DIR: "/bot-data"
+      MONITOR_STATUS_LOG_WINDOW: "${MONITOR_STATUS_LOG_WINDOW:-12h}"
+      MONITOR_STALE_LOG_MINUTES: "${MONITOR_STALE_LOG_MINUTES:-30}"
+      MONITOR_MAX_LOG_LINES: "${MONITOR_MAX_LOG_LINES:-2000}"
+    ports:
+      - "127.0.0.1:${MONITOR_PORT:-8787}:8787"
+    volumes:
+      # Docker socket access lets the monitor inspect the named bot container and
+      # read logs. Treat this as powerful host access even though the mount is
+      # marked read-only, and expose the service only over private Tailscale.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - liquidator-data:/bot-data:ro
+
 volumes:
   liquidator-data:

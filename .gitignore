@@ -3,6 +3,7 @@ node_modules/
 *.log
 data/
 .local-logs/
+.playwright-cli/
 .bot-test-loop.pid
 keyyy*
 digitalocean
