@@ -68,7 +68,7 @@ const CHAIN_CONFIGS = {
     swapRouter: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
     hardenedLiquidator: true, // hardened contract deployed 2026-06-02 (via private RPC)
-    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
+    pathAware: true, // V3 path-aware contract 0x81f151E5… deployed 2026-06-03 (1559 capped-fee)
   },
   base: {
     key: "base",
@@ -124,7 +124,7 @@ const CHAIN_CONFIGS = {
     // 100% real-collateral V3 coverage verified (scripts/probeCollateralVenues.js).
     swapRouter: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
-    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
+    pathAware: true, // V3 path-aware contract 0x81f151E5… deployed 2026-06-03
   },
   linea: {
     key: "linea",
@@ -188,7 +188,7 @@ const CHAIN_CONFIGS = {
     // ~99% real-collateral V3 coverage verified (only WETH.e→GHO lacks a path).
     swapRouter: "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
-    pathAware: false, // set true after redeploying the path-aware (3.3) contract here
+    pathAware: true, // V3 path-aware contract 0x81f151E5… deployed 2026-06-03
   },
   metis: {
     key: "metis",
