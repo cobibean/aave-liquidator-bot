@@ -61,6 +61,17 @@
   .chip.effort-md{background:#fdeccb;color:#92660a;border-color:#f1d79a}
   .chip.effort-hi{background:#fde2d6;color:#9a3412;border-color:#f3c4ac}
   .chip.risk{background:transparent}
+  .chip.shipped{background:#15803d;color:#fff;border-color:#15803d}
+  .chip.pending{background:transparent;color:var(--muted);border-style:dashed}
+  @media (prefers-color-scheme: dark){ .chip.shipped{background:#15803d;color:#fff;border-color:#1f9e4e} }
+  .donenote{border-left:3px solid var(--good);background:rgba(21,128,61,.08);padding:10px 14px;margin:12px 0 2px;border-radius:0 8px 8px 0;font-size:14.5px}
+  .donenote b{color:var(--good)}
+  .card.done{opacity:.97}
+  .card.done h3::before{content:"✓ ";color:var(--good);font-weight:800}
+  .statusbar{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 4px}
+  .statuspill{font-size:12.5px;font-weight:700;padding:5px 12px;border-radius:999px;border:1px solid var(--line)}
+  .statuspill.s-done{background:#15803d;color:#fff;border-color:#15803d}
+  .statuspill.s-todo{background:var(--chip);color:var(--muted)}
   @media (prefers-color-scheme: dark){
     .chip.impact-hi{background:#3a1c12;color:#f7b591;border-color:#5a2a18}
     .chip.impact-md{background:#352a10;color:#f0cd82;border-color:#574316}
@@ -105,8 +116,8 @@
   <p class="dek">A prioritized, batched plan to cut the time between "a position goes underwater" and "our transaction lands" — so we beat the other bots to it.</p>
   <div class="meta">
     <span><b>Repo:</b> <code>~/Documents/liquidator(s()</code></span>
-    <span><b>Date:</b> 2026-06-03</span>
-    <span><b>Status:</b> survey + suggestions (ship later in batches)</span>
+    <span><b>Created:</b> 2026-06-03</span>
+    <span><b>Updated:</b> 2026-06-03 (Batches 1 & 2 shipped + live)</span>
     <span><b>Scope:</b> latency only — not correctness/coverage</span>
   </div>
 </header>
@@ -119,6 +130,46 @@
     <li><b>You're already most of the way there architecturally</b> — the stratified watchlist + Multicall3 sweep + active-debt index are exactly the primitives a fast bot needs. The gap is the <em>trigger</em> (polling vs. events) and the <em>submit path</em> (serial reads + legacy gas).</li>
     <li><b>Plan is in 4 batches</b> below, each independently shippable. Ship Batch 1 only after the current crash-fix / coverage upgrades are confirmed healthy in prod.</li>
   </ul>
+</div>
+
+<!-- PROGRESS TRACKER (kept current as items ship) -->
+<div class="card" style="border-left:5px solid var(--good)">
+  <div class="rechead"><span class="num">PROGRESS</span><h3 style="margin:0">What's shipped so far</h3></div>
+  <p class="small" style="margin-top:6px">Updated 2026-06-03. Items below are <b>committed to <code>main</code> and live on the <code>liquidator-solo-1</code> droplet</b> unless noted. All new behavior defaults to current behavior / is opt-in, so nothing changed at runtime without a flag.</p>
+  <div class="statusbar">
+    <span class="statuspill s-done">✓ 1.1 Per-block trigger</span>
+    <span class="statuspill s-done">✓ 1.2 WS/private RPC</span>
+    <span class="statuspill s-done">✓ 1.3 Per-chain containers</span>
+    <span class="statuspill s-done">✓ 2.1 Lean submit path</span>
+    <span class="statuspill s-done">✓ 2.2 Batched enrichment</span>
+    <span class="statuspill s-done">✓ 2.3 Cache static reads</span>
+    <span class="statuspill s-done">✓ 3.1 EIP-1559 gas</span>
+    <span class="statuspill s-done">✓ 3.2 Nonce + async send</span>
+    <span class="statuspill s-todo">3.3 Contract swap-path (BLOCKED)</span>
+    <span class="statuspill s-todo">Batch 4 (frontier)</span>
+  </div>
+  <div class="donenote" style="margin-top:14px;border-left-color:var(--warn);background:rgba(180,83,9,.08)">
+    <b style="color:var(--warn)">⚠ 3.3 is blocked on a correctness bug found mid-implementation.</b>
+    The deployed contract swaps via Uniswap <b>V3</b> (<code>getPool</code> + <code>exactInput</code>), but
+    <code>src/chains.js</code> configures <b>V2/Sushi</b> routers for avalanche/base/arbitrum/optimism — so the
+    contract's collateral→debt swap branch would <em>revert</em> on those chains (no real swap-requiring
+    liquidation has ever succeeded there; consistent with "first live <code>executeOperation</code> still
+    unproven"). 3.3 only makes sense once routers are actually V3, and its contract change can ride along
+    with that fix. The correct per-chain V3 SwapRouter02 addresses have been identified and the issue is
+    handed off as its own task. <b>3.1 and 3.2 shipped without it</b> (both are chain-agnostic and don't touch the swap).
+  </div>
+  <div class="donenote" style="margin-top:14px">
+    <b>For agents picking this up:</b> Batches 1 &amp; 2 are done across 3 commits on <code>main</code>
+    (<code>6ce5972</code> batch-1 speed, <code>57e6952</code> pre-existing OOM/monitor, <code>671c8fe</code> 1.3+2.3).
+    Key runtime facts: the droplet now runs <b>one container per chain</b>
+    (<code>bot-base</code>, <code>bot-arbitrum</code>, <code>bot-optimism</code>, <code>bot-avalanche</code>, <code>bot-plasma</code>) —
+    there is no <code>aave-liquidator</code> container anymore. Logs: <code>docker compose logs -f bot-base</code>.
+    <code>TEST_MODE=false</code> (live). The per-block trigger (<code>BLOCK_TRIGGER</code>) is <b>built but OFF</b> —
+    it needs private/WebSocket RPCs (<code>&lt;CHAIN&gt;_WS_URL</code>) configured first. Line numbers in the
+    "Diagnosis" table below are from the <em>original</em> survey and have since shifted; trust the
+    function names. Full deploy/runbook detail lives in the project memory
+    (<code>liquidator-discovery-flaw.md</code>).
+  </div>
 </div>
 
 <nav class="toc">
@@ -177,13 +228,15 @@
   </div>
 </div>
 
-<div class="card rec rank1">
+<div class="card rec rank1 done">
   <div class="rechead"><span class="num">1.1</span><h3>Per-block watchlist re-check</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped (flag-gated, OFF)</span>
     <span class="chip impact-hi">Impact: very high</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">Latency: ≤15s → ~1 block</span>
   </div>
+  <div class="donenote"><b>Done as designed.</b> <code>bot.js</code> <code>runWatchlistCheck()</code> behind <code>BLOCK_TRIGGER=true</code> (default off). Runs <em>alongside</em> the 15s poll (which keeps maintaining the watchlist) with a <b>shared per-chain <code>lock.inFlight</code> guard</b> so the two never run concurrently — no double-submit / nonce stampede. Honors <code>TEST_MODE</code>. Uses a WS endpoint if configured (1.2), else HTTP block polling. <b>Still OFF in prod</b> until private/WS RPCs are set. Verified live on Avalanche (TEST_MODE): fired ~every 2s block, watchlist checks 118–231ms, guard interleaved correctly, 0 txs.</div>
   <p>Subscribe to new blocks and re-sweep <em>only the watchlist</em> (the near-threshold, non-dust wallets you already maintain) every block, instead of waiting for the 15s tick. The watchlist is tens–hundreds of addresses, so a Multicall3 sweep of it is ~100–300ms — cheap enough to run per block. Keep the full/warm/cold sweeps on their existing slower cadence to refresh the watchlist.</p>
   <span class="lbl">Today</span>
   <p class="now">Every chain does <code>while(true){ getUnhealthyPositions(); sleep(15s) }</code> — <span class="path">bot.js:90–110</span>. A position that crosses HF&lt;1 and is taken in the next block is gone ~14s before we look.</p>
@@ -206,13 +259,15 @@ if (process.env.BLOCK_TRIGGER === "true") {
   <p class="why"><b>Why:</b> the bot's own design doc (<span class="path">docs/event-driven-triggers.md</span>) already recommends this as step one. It reuses the watchlist + Multicall3 you've built. <b>Caveat:</b> public RPCs may throttle <code>eth_blockNumber</code>/<code>getLogs</code> under per-block load (Arbitrum is already flaky) — pair this with private/WS RPCs (1.2) and keep the <code>inFlight</code> guard + backoff.</p>
 </div>
 
-<div class="card rec rank1">
+<div class="card rec rank1 done">
   <div class="rechead"><span class="num">1.2</span><h3>Private + WebSocket RPCs (the enabler)</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Code shipped · config pending</span>
     <span class="chip impact-hi">Impact: high</span>
     <span class="chip effort-lo">Effort: low (config + $)</span>
     <span class="chip risk">Unblocks 1.1, 2.x, 4.x</span>
   </div>
+  <div class="donenote"><b>Code done; infra not yet purchased.</b> <code>src/provider.js</code> <code>createBlockProvider()</code> returns a <code>WebSocketProvider</code> when <code>&lt;CHAIN&gt;_WS_URL</code> (or <code>WS_URL</code> single-chain) is set, else <code>null</code> → HTTP block-polling fallback. Reads/sends stay on the HTTP provider. Verified WS block events against Avalanche public WSS. <b>Action remaining (yours):</b> add private/WS endpoints to the droplet <code>.env</code> (e.g. <code>BASE_WS_URL=wss://…</code>), then flip <code>BLOCK_TRIGGER=true</code> to actually realize 1.1's per-block reaction.</div>
   <p>Move each chain to a dedicated provider (Alchemy/Infura/QuickNode), preferring <code>wss://</code> endpoints. WebSocket gives push-based <code>block</code> events (no polling), lower latency, and headroom to run per-block sweeps across 5 chains without getting throttled. Arbitrum already uses Alchemy; extend to the rest.</p>
   <span class="lbl">Today</span>
   <p class="now">Public endpoints (<code>mainnet.base.org</code>, <code>api.avax.network</code>, etc.) in <span class="path">src/chains.js</span>; <code>StaticJsonRpcProvider</code> over HTTP in <span class="path">src/provider.js:7</span>. These throttle the historical backfill and <em>fail Arbitrum's contract-creation tx</em> — they won't sustain per-block load.</p>
@@ -221,13 +276,15 @@ if (process.env.BLOCK_TRIGGER === "true") {
   <p class="why"><b>Why:</b> this is the prerequisite the design doc flags for <em>all</em> latency work. Without it, per-block triggers just get rate-limited. Lowest code effort of any item here — mostly config + a paid plan.</p>
 </div>
 
-<div class="card rec rank2">
+<div class="card rec rank2 done">
   <div class="rechead"><span class="num">1.3</span><h3>Decouple the per-chain loops into separate workers/processes</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped &amp; live</span>
     <span class="chip impact-md">Impact: medium-high</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">Removes cross-chain starvation</span>
   </div>
+  <div class="donenote"><b>Done via one container per chain.</b> <code>docker-compose.yml</code> now defines 5 services (<code>bot-base / bot-arbitrum / bot-optimism / bot-avalanche / bot-plasma</code>) sharing one image, the same <code>.env</code>, and the same <code>liquidator-data</code> volume (stores are per-chain files). Each pins <code>CHAINS</code> to its one chain and gets its own <code>--max-old-space-size</code> + <code>mem_limit</code> sized for the 4 GB host (Base 768/1024m, arb+op 512/768m, avax+plasma 384/640m). <code>bot.js</code> unchanged (already single-chain). Live: all 5 restarts=0/no-OOM, Base WARM-sweeps 60k+ active-debt in its own process without starving others; host ~1.2 GB used. <b>Note: the old <code>aave-liquidator</code> container is gone</b> — use <code>docker compose logs -f bot-&lt;chain&gt;</code>.</div>
   <p>Run each chain in its own process (PM2 fork mode, Node <code>worker_threads</code>, or one container per chain) so a heavy Base cold sweep can't freeze Arbitrum's event loop and make us miss its block window.</p>
   <span class="lbl">Today</span>
   <p class="now"><span class="path">bot.js:70</span> runs all 5 chains in one event loop. A CPU-bound decode/encode burst on one chain delays every other chain's block handler — directly observed (Base's sweep spiking Optimism/Arbitrum cycle times to 48–73s).</p>
@@ -245,13 +302,15 @@ if (process.env.BLOCK_TRIGGER === "true") {
   </div>
 </div>
 
-<div class="card rec rank2">
+<div class="card rec rank2 done">
   <div class="rechead"><span class="num">2.1</span><h3>Pre-compute everything you can; parallelize the rest</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped &amp; live</span>
     <span class="chip impact-hi">Impact: high</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">~1–3s off Decide</span>
   </div>
+  <div class="donenote"><b>Done.</b> In <code>bot.js attemptLiquidation</code>: dropped the redundant <code>getUserHealthFactor</code> read (now uses the sweep's HF via <code>position.healthFactor</code>; <code>callStatic</code> remains the real freshness gate). Gas price fetched <b>once</b> (<code>sharedGasPrice</code>) and threaded through simulate → floor → overrides (<code>getTransactionOverrides</code> gained an optional <code>gasPrice</code> arg, backward-compatible — deploy scripts unaffected). Oracle native+debt prices cached per chain via <code>getOraclePriceCached</code> (<code>ORACLE_PRICE_TTL_MS</code>, default 5s).</div>
   <p>The current submit path is a chain of awaits, each waiting on the previous:</p>
   <pre><span class="cm">// bot.js attemptLiquidation, today (sequential):</span>
 getUserHealthFactor()        <span class="cm">// re-check HF      — already known from the sweep!</span>
@@ -270,13 +329,15 @@ getUserHealthFactor()        <span class="cm">// re-check HF      — already kn
   <p class="why"><b>Why:</b> on a contested liquidation, 4–6 fewer serial public-RPC hops is plausibly 1–3 seconds — often the whole margin between landing in block N vs N+2.</p>
 </div>
 
-<div class="card rec rank2">
+<div class="card rec rank2 done">
   <div class="rechead"><span class="num">2.2</span><h3>Batch + parallelize candidate enrichment</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped &amp; live</span>
     <span class="chip impact-md">Impact: medium-high</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">Big win when multiple targets appear at once</span>
   </div>
+  <div class="donenote"><b>Done via Multicall3 (not UiPoolDataProvider — avoids a new per-chain contract dep).</b> New <code>enrichCandidateBatched()</code> in <code>aaveHelpers.js</code> collapses a candidate's per-reserve <code>getUserReserveData</code> into <b>one <code>aggregate3</code> batch</b>, deriving primary debt + primary collateral from the same read. The enrichment loop now runs candidates <b>concurrently</b> via <code>mapWithConcurrency</code> (<code>ENRICH_CONCURRENCY</code>, default 10), preserving lowest-HF-first order. Verified byte-identical to the old serial path (12/12 Avalanche wallets, block-pinned) via <code>scripts/testEnrichEquivalence.js</code>.</div>
   <p>When a price move makes several positions liquidatable in the same block, we enrich them <em>one at a time</em>, and each enrichment is itself serial RPC.</p>
   <span class="lbl">Today</span>
   <p class="now"><span class="path">aaveHelpers.js:1280</span> loops candidates serially; <code>getPrimaryCollateral</code>/<code>getPrimaryDebtPosition</code> call <code>getReservesList</code> then iterate reserves with per-reserve <code>getUserReserveData</code> awaits (<span class="path">:1009</span>, <span class="path">:1327</span>). For a user with 10 reserves that's ~10+ sequential reads — per candidate.</p>
@@ -289,13 +350,15 @@ getUserHealthFactor()        <span class="cm">// re-check HF      — already kn
   <p class="why"><b>Why:</b> the lowest-HF target is the one every bot is racing for. If we burn 2s enriching candidate #3 before getting to the urgent #1 (they're sorted, but enrichment is still serial), we can lose it. Parallel enrichment + Multicall makes "found 5, ready to fire on all 5" near-instant.</p>
 </div>
 
-<div class="card rec rank3">
+<div class="card rec rank3 done">
   <div class="rechead"><span class="num">2.3</span><h3>Cache static, rarely-changing reads</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped &amp; live</span>
     <span class="chip impact-lo">Impact: low-medium</span>
     <span class="chip effort-lo">Effort: low</span>
     <span class="chip risk">Removes warm-path round-trips</span>
   </div>
+  <div class="donenote"><b>Done.</b> <code>getReservesListCached</code> (TTL <code>RESERVES_CACHE_TTL_MS</code>, default 5 min) + <code>getAssetMetadataCached</code> (immutable, cached for the chain's lifetime) added in 2.2 and now also wired into the <em>legacy</em> paths (<code>getDebtPosition</code>, <code>getDebtPositions</code>, <code>getUserReservePositions</code>), so reserves-list + ERC-20 symbol/decimals aren't re-fetched per call. Per-user dynamic reads (<code>getUserReserveData</code>) are intentionally <em>not</em> cached.</div>
   <p>Memoize per chain: <code>getReservesList()</code> (changes only when Aave lists a reserve), and ERC-20 <code>symbol()</code>/<code>decimals()</code> (immutable). Refresh on a long interval or on miss.</p>
   <p class="now"><span class="path">aaveHelpers.js:1322</span> and <span class="path">:1367</span> re-fetch these every time. Small individually, but they're on the enrichment path that runs during the race.</p>
   <p class="why"><b>Why:</b> cheap, safe, and compounds with 2.2 — every cached read is one fewer round-trip while the clock is running.</p>
@@ -310,13 +373,15 @@ getUserHealthFactor()        <span class="cm">// re-check HF      — already kn
   </div>
 </div>
 
-<div class="card rec rank2">
+<div class="card rec rank2 done">
   <div class="rechead"><span class="num">3.1</span><h3>EIP-1559 gas with an aggressive, tunable priority fee</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped &amp; live</span>
     <span class="chip impact-md">Impact: medium-high</span>
     <span class="chip effort-lo">Effort: low</span>
     <span class="chip risk">Inclusion priority</span>
   </div>
+  <div class="donenote"><b>Done.</b> <code>src/gas.js getTransactionOverrides</code> now returns <code>maxFeePerGas</code>/<code>maxPriorityFeePerGas</code> when the chain exposes a 1559 fee market (all 5 do), else falls back to legacy. <code>priorityFee = max(networkTip × PRIORITY_FEE_MULTIPLE, MIN_PRIORITY_FEE_GWEI) + chainBump</code>; <code>maxFeePerGas = baseFee × BASE_FEE_MULTIPLE + priorityFee</code>. <code>bot.js</code> fetches <code>getFeeData()</code> once (replacing the single <code>getGasPrice</code>) and threads it through. We never knowingly overpay into a loss: the minProfit floor already budgets <code>PROFIT_SAFETY_MULTIPLE × gas</code> and <code>callStatic</code> gates. Verified per chain: 1.5 gwei net tip × 1.5 = 2.25 gwei priority bid on Base/Avax/Arb/Op.</div>
   <p>Switch from legacy <code>gasPrice</code> + fixed gwei bump to <code>maxFeePerGas</code> / <code>maxPriorityFeePerGas</code>, with the priority fee set as a (tunable) multiple of the network's recent priority fee. On a profitable liquidation, overpaying gas to win is correct — the bonus dwarfs the gas.</p>
   <span class="lbl">Today</span>
   <p class="now"><span class="path">src/gas.js:5–10</span>: <code>gasPrice = getGasPrice() + bumpGwei</code>. A fixed bump doesn't track contention and uses the legacy fee market — you can't outbid on priority when two bots target the same position.</p>
@@ -325,13 +390,15 @@ getUserHealthFactor()        <span class="cm">// re-check HF      — already kn
   <p class="why"><b>Why:</b> when our tx and a competitor's land in the same block, ordering is (largely) by priority fee. A flat bump loses that auction; a profitability-scaled tip wins it.</p>
 </div>
 
-<div class="card rec rank3">
+<div class="card rec rank3 done">
   <div class="rechead"><span class="num">3.2</span><h3>Local nonce management + non-blocking submission</h3></div>
   <div class="chips">
+    <span class="chip shipped">✓ Shipped (async OFF by default)</span>
     <span class="chip impact-md">Impact: medium</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">Multiple targets / fire-and-confirm</span>
   </div>
+  <div class="donenote"><b>Done.</b> New <code>src/nonceManager.js</code>: per-(wallet,chain) <code>NonceManager</code> seeds from <code>getTransactionCount("pending")</code> once, hands out nonces locally (no round-trip per send), resyncs from chain on any send/confirm error, and tracks a bounded in-flight count. Each chain process gets its own manager. <b>Two halves, different defaults:</b> local nonce + the in-flight gate are always on (safe, removes a round-trip); <b>non-blocking submission is opt-in via <code>ASYNC_SEND=true</code></b> and the concurrency cap is <code>MAX_INFLIGHT_TX</code> (default 1 = the proven one-at-a-time behavior). Unit-tested: sequential + concurrent reserve (no dup), resync, cap, RPC-failure fallback.</div>
   <p>Don't block the loop on <code>tx.wait()</code> before handling the next target, and manage the nonce locally so back-to-back sends don't collide or wait on a <code>getTransactionCount</code> round-trip each time.</p>
   <span class="lbl">Today</span>
   <p class="now"><span class="path">bot.js:96–102</span> awaits each <code>attemptLiquidation</code> (which awaits <code>tx.wait()</code> at <span class="path">:278</span>) before the next. With several same-block targets, candidate #2 waits for #1's receipt — by then #2 is gone.</p>
@@ -341,16 +408,18 @@ getUserHealthFactor()        <span class="cm">// re-check HF      — already kn
 </div>
 
 <div class="card rec rank3">
-  <div class="rechead"><span class="num">3.3</span><h3>Trim contract gas (cheaper = faster to include, more margin to bid)</h3></div>
+  <div class="rechead"><span class="num">3.3</span><h3>Trim contract gas (pass resolved swap path in calldata)</h3></div>
   <div class="chips">
+    <span class="chip pending">⛔ Blocked — see below</span>
     <span class="chip impact-lo">Impact: low-medium</span>
     <span class="chip effort-md">Effort: medium (redeploy)</span>
     <span class="chip risk">On-chain</span>
   </div>
-  <p>The liquidation contract resolves the swap path <em>on-chain</em> at execution time: <code>_findFeeTier</code> calls <code>factory.getPool(...)</code> for up to 4 fee tiers, possibly ×2 for an intermediate hop (<span class="path">contracts/...sol:295–310</span>). That's several extra external calls inside the gas-metered tx.</p>
-  <span class="lbl">Change</span>
-  <p class="fix">Have the bot (which knows the assets) pass the resolved fee tier / full path in the call params, and use <code>preferredFeeTier</code> (already in the contract, <span class="path">:217</span>) so execution skips discovery. Pre-warm <code>preferredFeeTier</code> for the common collateral→debt pairs per chain.</p>
-  <p class="why"><b>Why:</b> lower gas per liquidation = larger profit margin to spend on priority fee (3.1) and a faster-to-validate tx. Lower priority than 3.1/3.2 since it needs a redeploy and the current contract works.</p>
+  <div class="donenote" style="border-left-color:var(--warn);background:rgba(180,83,9,.08)"><b style="color:var(--warn)">Blocked on a router correctness bug, handed off as its own task.</b> The plan: bot resolves the V3 swap path off-chain and passes it via a new <code>triggerLiquidationWithPath</code> entrypoint, so <code>executeOperation</code> skips on-chain <code>getPool</code> discovery. The contract change + off-chain resolver were written and compiled — <b>then aborted</b> when verification revealed the deployed contract is V3-only (<code>getPool</code> + <code>exactInput</code>) but <code>src/chains.js</code> configures <b>V2/Sushi routers</b> on avalanche/base/arbitrum/optimism, so the swap branch would revert on those chains regardless. The correct per-chain V3 SwapRouter02 addresses were identified (Arb/Op <code>0x68b3…Fc45</code> @ factory <code>0x1F98…F984</code>; Base <code>0x2626…e481</code> @ <code>0x3312…FDfD</code>; Avax <code>0xbb00…78cE</code>). 3.3's redeploy should ride along with that router fix. <b>3.1 + 3.2 shipped without 3.3</b> (neither touches the swap).</div>
+  <p>The liquidation contract resolves the swap path <em>on-chain</em> at execution time: <code>_findFeeTier</code> calls <code>factory.getPool(...)</code> for up to 4 fee tiers, possibly ×2 for an intermediate hop. That's several extra external calls inside the gas-metered tx.</p>
+  <span class="lbl">Change (deferred)</span>
+  <p class="fix">Bot resolves the fee tier / full V3 path off-chain and passes it in calldata via <code>triggerLiquidationWithPath</code>; the contract uses it directly (empty path → fall back to on-chain resolution). Requires a redeploy — fold it into the router-correctness fix so the new contract ships with the right V3 router.</p>
+  <p class="why"><b>Why:</b> lower gas per liquidation = larger profit margin to spend on priority fee (3.1) and a faster-to-validate tx. Lowest priority in Batch 3 and now gated behind the router fix.</p>
 </div>
 
 <!-- ============================================================ -->

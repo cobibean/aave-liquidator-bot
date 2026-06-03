@@ -14,6 +14,7 @@ const { getSelectedChainConfigs } = require("./src/chains");
 const { getTransactionOverrides } = require("./src/gas");
 const { createProvider, createBlockProvider } = require("./src/provider");
 const { loadWatchlist } = require("./src/borrowerStore");
+const { NonceManager, maxInFlight } = require("./src/nonceManager");
 
 const requiredEnv = ["PRIVATE_KEY"];
 const missingEnv = requiredEnv.filter((name) => !process.env[name]);
@@ -115,7 +116,11 @@ async function runChainBot(chainConfig) {
   // hit the same RPC, so they must never run concurrently on one chain — that
   // could double-submit the same liquidation or stampede the nonce. Whichever
   // grabs the flag first runs; the other skips this tick.
-  const ctx = { provider, chainConfig, aaveLiquidatorContract };
+  // One nonce manager per chain/process (3.2): assigns nonces locally so we don't
+  // pay a getTransactionCount round-trip per send, and so back-to-back sends to
+  // same-block targets don't collide. Only meaningful when a contract+wallet exist.
+  const nonceManager = aaveLiquidatorContract ? new NonceManager(wallet, chainConfig.key) : null;
+  const ctx = { provider, chainConfig, aaveLiquidatorContract, nonceManager };
   const lock = { inFlight: false };
 
   // Each cycle does an incremental Borrow scan + a parallel HF sweep, so it is
@@ -177,7 +182,7 @@ async function runChainBot(chainConfig) {
 // so it can run every block. Anything that crosses HF<1 here is enriched (one
 // batched read each, concurrently) and attempted immediately. The full/warm/cold
 // sweeps in the poll loop are what keep the watchlist populated; this only reacts.
-async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract }, blockNumber) {
+async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract, nonceManager }, blockNumber) {
   const chainKey = chainConfig.key || "default";
   const { watch } = loadWatchlist(chainKey);
   if (!watch || watch.size === 0) return;
@@ -222,7 +227,7 @@ async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract
 
     await attemptLiquidation(
       { ...position, user, healthFactor, totalDebtUsd },
-      { provider, chainConfig, aaveLiquidatorContract }
+      { provider, chainConfig, aaveLiquidatorContract, nonceManager }
     );
   }
 }
@@ -275,6 +280,7 @@ async function attemptLiquidation({
   provider,
   chainConfig,
   aaveLiquidatorContract,
+  nonceManager,
 }) {
   console.log("⚡ Attempting liquidation with:", {
     chain: chainConfig.name,
@@ -319,12 +325,27 @@ async function attemptLiquidation({
     return;
   }
 
-  // Fetch the live gas price ONCE for the whole submit path. It was previously
-  // fetched up to three times (simulate, floor preview, overrides); thread it
-  // through instead. Non-fatal if it fails — downstream falls back to a fresh read.
+  // Bounded in-flight gate (3.2). Skip if we already have MAX_INFLIGHT_TX
+  // unconfirmed txs on this chain (default 1 = old one-at-a-time behavior). This
+  // is what keeps async submission from nonce-stampeding. TEST_MODE never sends,
+  // so it's never gated.
+  if (!testMode && nonceManager && nonceManager.atCapacity(maxInFlight())) {
+    console.log(`⏸️ ${chainConfig.name}: at in-flight tx cap (${maxInFlight()}); skipping ${user} this pass.`);
+    return;
+  }
+
+  // Fetch the live fee data ONCE for the whole submit path (gas was previously
+  // fetched up to three times). getFeeData gives us both the legacy gasPrice (for
+  // the cost math in computeMinProfitUnits) AND the EIP-1559 fields (base + tip)
+  // that getTransactionOverrides uses to bid on inclusion priority (3.1). Thread
+  // both through. Non-fatal if it fails — downstream falls back to a fresh read.
+  let sharedFeeData = null;
   let sharedGasPrice = null;
   try {
-    sharedGasPrice = await provider.getGasPrice();
+    sharedFeeData = await provider.getFeeData();
+    // Effective gas price for cost estimation: prefer the 1559 ceiling we'd
+    // actually pay up to (maxFeePerGas), else the legacy gasPrice.
+    sharedGasPrice = sharedFeeData.maxFeePerGas || sharedFeeData.gasPrice || null;
   } catch (_) {
     // leave null; helpers will fetch their own.
   }
@@ -376,54 +397,97 @@ async function attemptLiquidation({
   try {
     const overrides = await getTransactionOverrides(provider, chainConfig, {
       gasLimit: chainConfig.liquidationGasLimit,
-      gasPrice: sharedGasPrice, // reuse the single fetch; helper falls back if null
+      feeData: sharedFeeData,   // EIP-1559 bid (3.1); helper falls back to legacy if absent
+      gasPrice: sharedGasPrice, // legacy fallback; reuse the single fetch
     });
+
+    // Reserve a nonce locally (3.2) so we don't round-trip getTransactionCount on
+    // the hot path and so concurrent sends to same-block targets get distinct
+    // nonces. We acquire the in-flight slot right before broadcast.
+    if (nonceManager) {
+      overrides.nonce = await nonceManager.reserve();
+    }
 
     // Compute a gas-aware profit floor and pass it on hardened chains. The
     // contract enforces max(thisFloor, storedMinProfit) and reverts if a bad
     // (e.g. sandwiched) swap can't clear it — so unprofitable liquidations cost
     // nothing beyond the failed-tx gas, and we never sell the bonus at a loss.
+    // Cost the floor against the gas price we'd actually pay: the 1559 ceiling
+    // (overrides.maxFeePerGas) or the legacy gasPrice, else the shared fetch.
+    const effGasPrice =
+      overrides.maxFeePerGas || overrides.gasPrice || sharedGasPrice || (await provider.getGasPrice());
     const minProfitUnits = await computeMinProfitUnits({
       provider,
       chainConfig,
       debtDecimals,
       estGasUnits: ethers.BigNumber.from(chainConfig.liquidationGasLimit),
-      gasPrice: overrides.gasPrice || (await provider.getGasPrice()),
+      gasPrice: effGasPrice,
     });
 
-    let tx;
-    if (chainConfig.hardenedLiquidator && minProfitUnits && aaveLiquidatorContract.triggerLiquidationWithMinProfit) {
-      console.log(`   ${chainConfig.name}: min-profit floor ${ethers.utils.formatUnits(minProfitUnits, debtDecimals)} ${debtSymbol}`);
-      tx = await aaveLiquidatorContract.triggerLiquidationWithMinProfit(
-        debtAsset,
-        debtToCover,
-        user,
-        collateralAsset,
-        minProfitUnits,
-        overrides
-      );
-    } else {
+    // A function so we can pick the right entrypoint once and reuse it.
+    const broadcast = () => {
+      if (chainConfig.hardenedLiquidator && minProfitUnits && aaveLiquidatorContract.triggerLiquidationWithMinProfit) {
+        console.log(`   ${chainConfig.name}: min-profit floor ${ethers.utils.formatUnits(minProfitUnits, debtDecimals)} ${debtSymbol}`);
+        return aaveLiquidatorContract.triggerLiquidationWithMinProfit(
+          debtAsset, debtToCover, user, collateralAsset, minProfitUnits, overrides
+        );
+      }
       // Arbitrum (old contract) or floor-compute failed: 4-arg path uses the
       // contract's stored minProfit floor.
-      tx = await aaveLiquidatorContract.triggerLiquidation(
-        debtAsset,
-        debtToCover,
-        user,
-        collateralAsset,
-        overrides
+      return aaveLiquidatorContract.triggerLiquidation(
+        debtAsset, debtToCover, user, collateralAsset, overrides
       );
+    };
+
+    // Occupy an in-flight slot for the whole submit→confirm lifetime; released
+    // when the receipt resolves (sync or async).
+    if (nonceManager) nonceManager.acquire();
+    let slotReleased = false;
+    const releaseSlot = () => {
+      if (!slotReleased && nonceManager) { nonceManager.release(); slotReleased = true; }
+    };
+
+    let tx;
+    try {
+      tx = await broadcast(); // resolves once the tx is broadcast (hash assigned)
+    } catch (sendErr) {
+      // Broadcast failed: the reserved nonce was NOT consumed, so resync from the
+      // chain to avoid a permanent gap, release the slot, and rethrow to the outer
+      // handler for logging.
+      releaseSlot();
+      if (nonceManager) await nonceManager.resync();
+      throw sendErr;
     }
 
-    console.log(`✅ TX sent: ${tx.hash}`);
-    const receipt = await tx.wait();
-    if (receipt.status === 1) {
-      console.log(`🎉 Successful liquidation: ${tx.hash}`);
-    } else {
-      console.warn(`⚠️ Liquidation TX failed on-chain: ${tx.hash}`);
+    console.log(`✅ TX sent: ${tx.hash}${overrides.nonce !== undefined ? ` (nonce ${overrides.nonce})` : ""}`);
+
+    // Confirmation. Default: block on the receipt (the proven path). With
+    // ASYNC_SEND=true: don't block — confirm out-of-band so the caller can move
+    // to the next same-block target immediately. Either way the in-flight slot is
+    // released and, on a confirmation error, the nonce is resynced.
+    const confirm = tx
+      .wait()
+      .then((receipt) => {
+        if (receipt.status === 1) console.log(`🎉 Successful liquidation: ${tx.hash}`);
+        else console.warn(`⚠️ Liquidation TX failed on-chain: ${tx.hash}`);
+      })
+      .catch(async (waitErr) => {
+        if (waitErr.code === "TRANSACTION_REPLACED") {
+          console.warn(`⚠️ Transaction was replaced: ${waitErr.replacement && waitErr.replacement.hash}`);
+        } else {
+          console.error(`❌ Liquidation confirm failed (${tx.hash}):`, waitErr.message);
+        }
+        if (nonceManager) await nonceManager.resync();
+      })
+      .finally(releaseSlot);
+
+    if (process.env.ASYNC_SEND !== "true") {
+      await confirm; // blocking path (default)
     }
+    // else: leave `confirm` running in the background; the in-flight cap bounds it.
   } catch (error) {
     if (error.code === "TRANSACTION_REPLACED") {
-      console.warn(`⚠️ Transaction was replaced: ${error.replacement.hash}`);
+      console.warn(`⚠️ Transaction was replaced: ${error.replacement && error.replacement.hash}`);
     } else {
       console.error(`❌ Liquidation failed:`, error.message);
     }
