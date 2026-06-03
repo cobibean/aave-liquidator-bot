@@ -7,6 +7,17 @@ This report combines the live droplet investigation, recent on-chain liquidation
 counts, current bot behavior, and the user's proposed direction. Treat it as a
 decision brief, not as final strategy.
 
+> **⚠️ SNAPSHOT — partly superseded (updated 2026-06-03 PM).** This brief captured
+> the state that *motivated* the speed work; several "current behavior" issues
+> below are now FIXED: the full-sweep OOM / crash-loop (streaming sweep, Layer 1),
+> empty watchlists, and the single-process contention (each chain now runs in its
+> own container — speed task 1.3). Also shipped since: per-block trigger (built,
+> OFF), EIP-1559 gas + local nonce (3.1/3.2), batched/parallel enrichment (2.2).
+> NEW open issue discovered afterward: the swap-router V2/V3 mismatch (the contract
+> swaps via Uniswap V3 but 4 of 5 chains are configured with V2/Sushi routers) —
+> redeploy fix in progress. See `docs/liquidator-speed-optimizations.html` and the
+> project memory for current status.
+
 ## Executive Summary
 
 The bot is live on the DigitalOcean droplet with `TEST_MODE=false`, but it is

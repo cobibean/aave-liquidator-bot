@@ -94,9 +94,9 @@
   <h1>The Liquidator</h1>
   <p class="dek">A multi-chain bot that finds underwater Aave loans and liquidates them for the discount — and the story of why it was catching nothing, and how that got fixed.</p>
   <div class="meta">
-    <span><b>Status:</b> live on droplet · <span class="pill wait">TEST_MODE</span></span>
-    <span><b>Chains:</b> 5</span>
-    <span><b>Updated:</b> 2026-06-02</span>
+    <span><b>Status:</b> live on droplet · <span class="pill">TEST_MODE=false</span></span>
+    <span><b>Chains:</b> 5 (one container each)</span>
+    <span><b>Updated:</b> 2026-06-03</span>
     <span><b>Audience:</b> humans &amp; agents</span>
   </div>
 </div></header>
@@ -134,7 +134,7 @@
     <div class="card"><h4>Watch</h4><p><small>Check each borrower's health factor continuously, focusing on those near the danger line.</small></p></div>
     <div class="card"><h4>Strike</h4><p><small>When HF &lt; 1 and it's profitable, flash-loan the debt, liquidate, swap collateral, repay, keep the spread.</small></p></div>
   </div>
-  <p>It runs <b>24/7</b> on a DigitalOcean droplet in Docker, across 5 EVM chains in one process, each on its own loop.</p>
+  <p>It runs <b>24/7</b> on a DigitalOcean droplet in Docker — <b>one container per chain</b> (5 EVM chains), each its own process/heap so a heavy sweep on one can't stall the others.</p>
 </section>
 
 <section id="story">
@@ -254,20 +254,22 @@ liveGasCostUSD via Aave oracle (native &amp; debt prices, 8-dp USD)</pre>
 <section id="run">
   <h2 class="sec">07 · Running &amp; operating it</h2>
   <h3>Where it lives</h3>
-  <p>DigitalOcean droplet <code>liquidator-solo-1</code> (nyc3, 2 vCPU / 4 GB), app dir <code>/opt/aave-liquidator-bot</code>, container <code>aave-liquidator</code> via Docker Compose. Borrower store persists in the named volume <code>liquidator-data</code> at <code>/app/data</code>.</p>
+  <p>DigitalOcean droplet <code>liquidator-solo-1</code> (nyc3, 2 vCPU / 4 GB), app dir <code>/opt/aave-liquidator-bot</code>. <b>One container per chain</b> via Docker Compose: <code>bot-plasma</code>, <code>bot-arbitrum</code>, <code>bot-base</code>, <code>bot-avalanche</code>, <code>bot-optimism</code> (+ <code>liquidator-monitor</code>). All share the named volume <code>aave-liquidator-bot_liquidator-data</code> at <code>/app/data</code> (per-chain store files).</p>
   <h3>Deploy an update</h3>
-  <pre><span class="c"># from your machine — preserves the droplet's .env</span>
-rsync -az --delete --exclude .env --exclude node_modules \
-  --exclude data --exclude .git ./ \
+  <pre><span class="c"># from your machine — preserves the droplet's .env + data volume. NO --delete.</span>
+ssh root@&lt;droplet-ip&gt; 'cd /opt/aave-liquidator-bot &amp;&amp; cp -a .env .env.bak.$(date +%s)'
+rsync -az --exclude .env --exclude '.env.*' --exclude node_modules \
+  --exclude data --exclude .git --exclude graphify-out --exclude output ./ \
   root@&lt;droplet-ip&gt;:/opt/aave-liquidator-bot/
 ssh root@&lt;droplet-ip&gt; 'cd /opt/aave-liquidator-bot &amp;&amp; docker compose up -d --build'</pre>
-  <h3>Watch it</h3>
-  <pre>docker logs -f aave-liquidator                 <span class="c"># live</span>
-docker logs aave-liquidator | grep "🔥 Found"  <span class="c"># real catches</span>
-docker logs aave-liquidator | grep "BACKFILL complete"</pre>
+  <h3>Watch it (per chain — there is no single <code>aave-liquidator</code> container)</h3>
+  <pre>docker compose logs -f bot-base                       <span class="c"># live, one chain</span>
+docker logs bot-base | grep "🔥 Found"                <span class="c"># real catches</span>
+for c in bot-plasma bot-arbitrum bot-base bot-avalanche bot-optimism; do
+  docker logs "$c" | grep "BACKFILL complete"; done</pre>
   <h3>Check reality (did we cover what's being liquidated?)</h3>
-  <pre>docker exec aave-liquidator node scripts/recentLiquidations.js
-docker exec aave-liquidator node scripts/probeMeaningfulCoverage.js base 100</pre>
+  <pre>docker exec bot-base node scripts/recentLiquidations.js
+docker exec bot-base node scripts/probeMeaningfulCoverage.js base 100</pre>
   <div class="call bad"><b>Live mode</b>The bot submits when <code>TEST_MODE=false</code>. That can send real transactions and spend real gas. Confirm it deliberately in the droplet <code>.env</code> before every restart. <b>It is live today.</b></div>
 </section>
 
@@ -313,10 +315,10 @@ docker exec aave-liquidator node scripts/probeMeaningfulCoverage.js base 100</pr
 <section id="limits">
   <h2 class="sec">10 · Known limits &amp; what's next</h2>
   <div class="grid g2">
-    <div class="card"><h4><span class="pill wait">open</span> Arbitrum contract</h4><p><small>Public RPCs reject the contract-creation tx. Arbitrum runs the old (unhardened) contract — still protected by the bot's callStatic gate. Needs a <b>private RPC</b> (Alchemy/Infura) to deploy the hardened one.</small></p></div>
-    <div class="card"><h4><span class="pill wait">open</span> Sizeable-coverage metric</h4><p><small>Re-measure once Avalanche/Optimism backfills finish — the proof the deep discovery worked (was ~30% at 30-day depth).</small></p></div>
-    <div class="card"><h4><span class="pill wait">idea</span> Per-block triggers</h4><p><small>React on each new block (not a 15s poll) to compete with adjacent-block MEV bots. Designed, not built. Needs private/WS RPCs.</small></p></div>
-    <div class="card"><h4><span class="pill wait">idea</span> Infra</h4><p><small>Single 2-vCPU box runs all 5 chains in one process; heavy backfills contend. Private RPCs + per-chain workers would harden throughput.</small></p></div>
+    <div class="card"><h4><span class="pill wait">open · blocking</span> Swap-router V2/V3 mismatch</h4><p><small>The contract swaps via Uniswap <b>V3</b> (getPool + exactInput) but avalanche/base/arbitrum/optimism are configured with <b>V2/Sushi</b> routers — so the collateral→debt swap would revert there. Correct per-chain V3 SwapRouter02 addresses identified; <b>redeploy fix in progress</b>. Until fixed, swap-requiring liquidations only complete where the router is genuinely V3.</small></p></div>
+    <div class="card"><h4><span class="pill">done</span> Arbitrum hardened contract</h4><p><small>Deployed — Arbitrum now runs the hardened contract (<code>0x049DBB52…</code>) like the other chains, via a private RPC.</small></p></div>
+    <div class="card"><h4><span class="pill">done</span> Per-block triggers + per-chain infra</h4><p><small>Built (speed 1.1/1.3): per-block watchlist re-check exists behind <code>BLOCK_TRIGGER</code> (OFF until WS RPCs are set); each chain now runs in its own container/process. EIP-1559 gas + local nonce also shipped (3.1/3.2).</small></p></div>
+    <div class="card"><h4><span class="pill wait">open</span> Sizeable-coverage metric</h4><p><small>Re-measure periodically — the proof the deep discovery works (was ~88% on sizeable ≥$100 targets at go-live).</small></p></div>
   </div>
   <div class="call"><b>For an agent picking this up</b>Read <code>~/.claude/projects/…/memory/liquidator-discovery-flaw.md</code> and <code>liquidator-project-facts.md</code> for the full history and gotchas (e.g. the repo path has literal parens; the contract source for the old 4-chain variant is missing; deployment blocks were binary-searched). The droplet is the source of truth — inspect its container, not local state.</div>
 </section>
@@ -324,7 +326,7 @@ docker exec aave-liquidator node scripts/probeMeaningfulCoverage.js base 100</pr
 </div>
 
 <footer><div class="wrap">
-  <span class="tag">Aave V3 Liquidator · internal field guide · generated 2026-06-02</span>
+  <span class="tag">Aave V3 Liquidator · internal field guide · generated 2026-06-02 · updated 2026-06-03 (per-chain containers, speed batches 1–3, router bug)</span>
   <p>Built &amp; documented during a review that took the bot from catching 0 of ~107 overnight liquidations to a complete-discovery, profit-gated, multi-chain liquidator. Still in TEST_MODE — go-live is a human call.</p>
 </div></footer>
 </body>

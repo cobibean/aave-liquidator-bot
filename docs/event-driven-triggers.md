@@ -59,11 +59,15 @@ the bot runs against a dedicated node and a bundle relay.
   The public RPCs already throttle the heavy historical backfill and **fail Arbitrum's
   contract-creation tx** ("processing response error") — they will not sustain per-block load
   across 5 chains.
-- Per-chain processes or workers so one chain's load doesn't starve the others' event loop
-  (the single Node process already serializes all 5; see the ~17-min full-sweep incident).
+- Per-chain processes or workers so one chain's load doesn't starve the others' event loop.
+  **DONE (2026-06-03, speed task 1.3):** each chain now runs in its own container/process/heap
+  (compose services `bot-<chain>`), so this no longer applies — the single-process serialization
+  that caused the ~17-min full-sweep incident is gone.
 
 ## Recommendation
 Implement **(1) per-block watchlist re-check** behind a flag (`BLOCK_TRIGGER=true`), default off,
-once private/WS RPCs are in place. It is the highest-leverage, lowest-risk latency win and
-reuses the existing watchlist + Multicall3 sweep. Defer (2) and (3) until there's evidence the
+once private/WS RPCs are in place. **STATUS (2026-06-03): BUILT and deployed (speed task 1.1),
+still OFF** — it reuses the existing watchlist + Multicall3 sweep and runs alongside the poll with
+a shared in-flight guard; `src/provider.js` has the WebSocket branch (1.2). Flip `BLOCK_TRIGGER=true`
+once private/WS RPCs (`<CHAIN>_WS_URL`) are configured. Defer (2) and (3) until there's evidence the
 bot is winning sizeable liquidations and the infra (private nodes, bundle relay) is funded.

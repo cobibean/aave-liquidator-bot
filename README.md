@@ -8,21 +8,44 @@ This bot continuously monitors Aave borrowers on configured networks, identifies
 
 ## Features
 
-- **Real-time Monitoring**: Scans recent Aave Borrow events and checks positions on-chain
-- **Health Factor Calculation**: Computes health factors for monitored accounts
-- **Liquidation Automation**: Automatically executes liquidations when profitable
-- **Flash Loan Integration**: Uses flash loans to minimize capital requirements
-- **Configurable Settings**: Adjust thresholds and parameters via environment variables
-- **Detailed Logging**: Comprehensive logging for monitoring and debugging
+- **Persistent borrower discovery**: a one-time deep backfill of Aave `Borrow`
+  events (from the pool deployment block, capped per chain) builds a persisted
+  borrower set, then cheap incremental scans keep it current. (Not just "recent"
+  events — aged positions are the ones that actually get liquidated.)
+- **Stratified, batched health-factor sweep**: all health checks go through
+  Multicall3 and stream batch-by-batch (flat memory even at Base's ~210k
+  borrowers). Three tiers by cost — a hot **watchlist** (near-threshold + non-dust)
+  every cycle, a **warm** sweep of the active-debt index periodically, and a
+  **cold** full sweep that rebuilds the index.
+- **Per-chain isolation**: each chain runs in its own container/process/heap.
+- **Optional per-block trigger**: re-check the watchlist every block (off by
+  default; enable with `BLOCK_TRIGGER=true` + WebSocket RPCs).
+- **Profitability gates**: callStatic pre-check + an on-chain gas-aware minProfit
+  floor; EIP-1559 priority-fee bidding to win contested inclusion.
+- **Flash-loan liquidation**: minimal capital; collateral is swapped to repay.
+- **Configurable + logged**: tune via environment variables (see `.env.example`).
 
 ## How It Works
 
-1. The bot scans recent Aave Borrow events for active borrowers
-2. It calculates health factors for each borrower
-3. When it identifies positions below the liquidation threshold, it triggers the liquidation process
-4. The liquidation is executed using a flash loan to borrow the required debt asset
-5. The collateral is received, swapped (if necessary), and the flash loan is repaid
-6. Any profit remains in the liquidator's wallet
+1. The bot maintains a persisted set of Aave borrowers per chain (deep backfill
+   once, incremental scans thereafter).
+2. Each cycle it runs a stratified Multicall3 sweep to find positions below the
+   health-factor threshold, filtering out sub-`MIN_DEBT_USD` dust.
+3. For each genuinely-unhealthy, non-dust position it enriches the debt +
+   collateral (one batched read each, concurrently) and simulates the liquidation
+   (`callStatic`) before spending any gas.
+4. If viable, it triggers the liquidation via a flash loan (EIP-1559 gas, local
+   nonce), enforcing a gas-aware minimum-profit floor on-chain.
+5. The collateral is received, swapped to the debt asset, and the flash loan is
+   repaid.
+6. Any profit remains in the liquidator's wallet.
+
+> **Known issue (fix in progress):** the liquidator contract swaps via Uniswap
+> **V3**, but `src/chains.js` currently configures **V2/Sushi** routers on
+> avalanche/base/arbitrum/optimism, so the collateral→debt swap would revert on
+> those chains. A redeploy with the correct per-chain V3 routers is being worked
+> separately. Until then, swap-requiring liquidations only complete where the
+> configured router is genuinely V3.
 
 ## Prerequisites
 
@@ -138,7 +161,10 @@ SMOKE_CHAINS=arbitrum npm run smoke:chains
 CHAIN=arbitrum node bot.js
 ```
 
-For production use, consider using a process manager like PM2:
+For a quick single-process run (dev / one machine, all chains in one Node
+process) you can use a process manager like PM2 — but the production deployment
+is Docker Compose with one container per chain (below), which isolates each
+chain's event loop and heap:
 
 ```bash
 npm install -g pm2
@@ -146,7 +172,7 @@ pm2 start bot.js --name "aave-liquidator"
 pm2 logs aave-liquidator
 ```
 
-Or run it with Docker Compose. Each chain runs in its OWN container
+Production: run it with Docker Compose. Each chain runs in its OWN container
 (`bot-base`, `bot-arbitrum`, `bot-optimism`, `bot-avalanche`, `bot-plasma`) so
 one chain's heavy sweep or OOM can't stall the others; they share the same
 `.env` and the same `liquidator-data` volume (stores are per-chain files).
@@ -173,10 +199,12 @@ The bot outputs detailed logs showing:
 ### Private monitor dashboard
 
 This repo includes a small Express dashboard in `monitor/` for a human-readable
-operator view. It summarizes the `aave-liquidator` Docker container, recent bot
-logs, liquidation activity, per-chain borrower progress, and warnings. Raw logs
-are hidden on initial page load and are fetched only when the Raw logs controls
-are used.
+operator view. It summarizes one bot container's logs (set by
+`MONITOR_BOT_CONTAINER`, defaults to `bot-base` — point it at another chain's
+container to watch that chain), liquidation activity, per-chain borrower
+progress (read from the shared data volume, so this covers all chains), and
+warnings. Raw logs are hidden on initial page load and are fetched only when the
+Raw logs controls are used.
 
 Security model:
 

@@ -1,5 +1,13 @@
 # Handoff: migrate the Aave liquidator bot to its own DigitalOcean droplet
 
+> **⚠️ HISTORICAL / COMPLETED (as of 2026-06-03).** This migration is DONE — the
+> bot now runs on its own dedicated droplet `liquidator-solo-1`. This doc is kept
+> for reference; its commands describe the OLD single-container model
+> (`aave-liquidator`). Current runtime is **one container per chain**
+> (`bot-base`, `bot-arbitrum`, `bot-optimism`, `bot-avalanche`, `bot-plasma`) — see
+> `AGENTS.md` and `README.md` for the up-to-date deploy/inspect commands. Do not
+> follow the per-container `docker exec aave-liquidator …` loops below verbatim.
+
 You are taking over an operations task. An Aave V3 liquidation bot currently runs on a
 **shared** DigitalOcean droplet that is overloaded (load ~23 on 2 vCPUs, 0 free swap,
 ~108 MB free RAM) because other `hermes-fleet` services share the box. The bot itself is
