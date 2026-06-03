@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aave Liquidator — Speed Optimization Plan</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --paper:#fbf9f4; --card:#ffffff; --muted:#6b6b6b;
+    --line:#e7e2d8; --accent:#c2410c; --accent2:#0f766e; --warn:#b45309;
+    --good:#15803d; --bad:#b91c1c; --chip:#f1ede3;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--ink:#ece8df;--paper:#14130f;--card:#1c1b16;--muted:#a39e92;--line:#2c2a22;--chip:#23211a;}
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:17px}
+  .wrap{max-width:940px;margin:0 auto;padding:0 22px}
+
+  header.mast{border-bottom:3px solid var(--ink);padding:34px 0 18px;margin-bottom:8px}
+  .kicker{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);font-weight:700}
+  h1{font-size:clamp(32px,6vw,54px);line-height:1.02;margin:.18em 0 .1em;letter-spacing:-.02em;font-weight:800}
+  .dek{font-size:20px;color:var(--muted);max-width:54ch;margin:.2em 0 .6em}
+  .meta{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px;margin-top:14px}
+  .meta b{color:var(--ink)}
+
+  .tldr{background:var(--ink);color:var(--paper);border-radius:14px;padding:22px 24px;margin:26px 0}
+  .tldr h2{margin:0 0 .4em;font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:#f5b78f}
+  .tldr ul{margin:0;padding-left:1.1em}
+  .tldr li{margin:.4em 0}
+  .tldr li::marker{color:#f5b78f}
+
+  nav.toc{position:sticky;top:0;background:var(--paper);border-bottom:1px solid var(--line);padding:10px 0;margin:0 0 26px;z-index:5;font-size:13px}
+  nav.toc a{color:var(--muted);text-decoration:none;margin-right:16px;white-space:nowrap}
+  nav.toc a:hover{color:var(--accent)}
+
+  h2.sec{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent2);margin:38px 0 6px;font-weight:700}
+  h3{font-size:24px;margin:18px 0 4px;letter-spacing:-.01em}
+  p{margin:.5em 0}
+  .lead{font-size:18px}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:16px 0}
+  .rec{border-left:5px solid var(--accent);}
+  .rec.rank1{border-left-color:var(--bad)}
+  .rec.rank2{border-left-color:var(--warn)}
+  .rec.rank3{border-left-color:var(--accent2)}
+
+  .rechead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .rechead h3{margin:0}
+  .num{font-family:var(--mono);font-size:13px;color:var(--muted);font-weight:700}
+
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px}
+  .chip{font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;font-weight:700;padding:3px 9px;border-radius:999px;background:var(--chip);color:var(--ink);border:1px solid var(--line)}
+  .chip.impact-hi{background:#fde2d6;color:#9a3412;border-color:#f3c4ac}
+  .chip.impact-md{background:#fdeccb;color:#92660a;border-color:#f1d79a}
+  .chip.impact-lo{background:#e6efe8;color:#1f6b3a;border-color:#c6ddcb}
+  .chip.effort-lo{background:#e6efe8;color:#1f6b3a;border-color:#c6ddcb}
+  .chip.effort-md{background:#fdeccb;color:#92660a;border-color:#f1d79a}
+  .chip.effort-hi{background:#fde2d6;color:#9a3412;border-color:#f3c4ac}
+  .chip.risk{background:transparent}
+  @media (prefers-color-scheme: dark){
+    .chip.impact-hi{background:#3a1c12;color:#f7b591;border-color:#5a2a18}
+    .chip.impact-md{background:#352a10;color:#f0cd82;border-color:#574316}
+    .chip.impact-lo,.chip.effort-lo{background:#13261a;color:#8fd6a6;border-color:#21412c}
+    .chip.effort-md{background:#352a10;color:#f0cd82;border-color:#574316}
+    .chip.effort-hi{background:#3a1c12;color:#f7b591;border-color:#5a2a18}
+  }
+
+  code,.path{font-family:var(--mono);font-size:.88em;background:var(--chip);padding:1px 6px;border-radius:5px}
+  pre{background:var(--ink);color:#e8e4da;border-radius:10px;padding:14px 16px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.5}
+  pre .cm{color:#9aa0a6}
+  .why{color:var(--muted)}
+  .now,.fix{margin:8px 0}
+  .lbl{font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--muted);display:block;margin-top:10px}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  td.r,th.r{text-align:right;font-family:var(--mono)}
+
+  .callout{border:1px dashed var(--line);border-radius:12px;padding:14px 18px;margin:16px 0;background:var(--chip)}
+  .callout.warn{border-color:var(--warn);background:rgba(180,83,9,.07)}
+  .callout.good{border-color:var(--good);background:rgba(21,128,61,.07)}
+
+  .batch{display:flex;align-items:center;gap:12px;margin:30px 0 4px}
+  .batch .b-no{font-family:var(--mono);font-weight:800;font-size:34px;color:var(--accent);line-height:1}
+  .batch .b-meta{font-size:13px;color:var(--muted)}
+  .batch h2.sec{margin:0}
+
+  footer{border-top:3px solid var(--ink);margin-top:50px;padding:20px 0 60px;font-size:13px;color:var(--muted)}
+  .small{font-size:13px;color:var(--muted)}
+  hr.soft{border:0;border-top:1px solid var(--line);margin:30px 0}
+  ul.tight li{margin:.25em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="mast">
+  <div class="kicker">Aave Liquidator · Performance Brief</div>
+  <h1>Optimizing for Speed</h1>
+  <p class="dek">A prioritized, batched plan to cut the time between "a position goes underwater" and "our transaction lands" — so we beat the other bots to it.</p>
+  <div class="meta">
+    <span><b>Repo:</b> <code>~/Documents/liquidator(s()</code></span>
+    <span><b>Date:</b> 2026-06-03</span>
+    <span><b>Status:</b> survey + suggestions (ship later in batches)</span>
+    <span><b>Scope:</b> latency only — not correctness/coverage</span>
+  </div>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR — the one thing that matters</h2>
+  <ul>
+    <li><b>The bot polls every 15 seconds. Positions get liquidated within ~1 block (≈0.25–2s).</b> On these L2s we are structurally too slow to win a contested liquidation, no matter how clean the rest of the code is. This is the headline.</li>
+    <li><b>Everything else is downstream of that.</b> Faster reaction (per-block / push triggers) is the biggest win; trimming the ~7 sequential RPC calls between "found it" and "sent it" is the second; private RPCs are the enabler for both.</li>
+    <li><b>You're already most of the way there architecturally</b> — the stratified watchlist + Multicall3 sweep + active-debt index are exactly the primitives a fast bot needs. The gap is the <em>trigger</em> (polling vs. events) and the <em>submit path</em> (serial reads + legacy gas).</li>
+    <li><b>Plan is in 4 batches</b> below, each independently shippable. Ship Batch 1 only after the current crash-fix / coverage upgrades are confirmed healthy in prod.</li>
+  </ul>
+</div>
+
+<nav class="toc">
+  <a href="#how">How a race is won</a>
+  <a href="#where">Where time goes today</a>
+  <a href="#b1">Batch 1</a>
+  <a href="#b2">Batch 2</a>
+  <a href="#b3">Batch 3</a>
+  <a href="#b4">Batch 4</a>
+  <a href="#measure">How to measure</a>
+  <a href="#nots">Non-goals</a>
+</nav>
+
+<!-- ============================================================ -->
+<h2 class="sec" id="how">Background</h2>
+<h3>How a liquidation race is actually won</h3>
+<p class="lead">Three clocks run in series. We only win if the sum beats the competitor's sum.</p>
+<table>
+  <thead><tr><th>Clock</th><th>What it is</th><th>Where it lives</th><th class="r">Today</th></tr></thead>
+  <tbody>
+    <tr><td><b>1. Detect</b></td><td>Time from "HF crosses 1.0 on-chain" to "our process notices."</td><td><span class="path">bot.js</span> poll loop</td><td class="r">up to 15s</td></tr>
+    <tr><td><b>2. Decide</b></td><td>Re-check HF, find debt + collateral, simulate, compute profit floor, build gas.</td><td><span class="path">aaveHelpers.js</span> + <span class="path">bot.js attemptLiquidation</span></td><td class="r">~1–4s (serial RPC)</td></tr>
+    <tr><td><b>3. Deliver</b></td><td>Sign + broadcast + get included in a block with high enough priority.</td><td><span class="path">src/gas.js</span> + provider</td><td class="r">1+ block, legacy gas</td></tr>
+  </tbody>
+</table>
+<p>The professional bots we lose to (vanity addresses landing in the same/adjacent block) collapse <b>Detect</b> to ~0 (they react per-block or to the oracle-update tx in the mempool) and <b>Deliver</b> to a single block via private orderflow / aggressive priority fees. Our biggest gap is Detect; our second is the serial RPC chain in Decide.</p>
+
+<div class="callout warn">
+  <b>Reality anchor (from the 2026-06-03 situation report).</b> Over ~16h: Arbitrum 36 liquidations, Base 18, Avalanche 32, Optimism 22 — effectively all taken by competitors. Even with discovery fixed, a 15s poll means we'd only catch the slow ones (positions that sit underwater for many seconds). The fast money requires per-block reaction.
+</div>
+
+<!-- ============================================================ -->
+<h2 class="sec" id="where">Diagnosis</h2>
+<h3>Where the time actually goes today</h3>
+<p>Reading the hot path end-to-end, here are the concrete latency sources, each tied to code:</p>
+<table>
+  <thead><tr><th>#</th><th>Latency source</th><th>Evidence</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td><b>15s fixed poll cadence.</b> A cycle sleeps <code>SCAN_INTERVAL_MS</code> regardless of new blocks.</td><td><span class="path">bot.js:88</span>, <span class="path">bot.js:109</span></td></tr>
+    <tr><td>B</td><td><b>All 5 chains share one Node event loop.</b> <code>Promise.all(chainConfigs.map(runChainBot))</code> — one chain's heavy sweep or backfill starves the others (documented ~17-min full-sweep / OOM incidents).</td><td><span class="path">bot.js:70</span></td></tr>
+    <tr><td>C</td><td><b>Serial enrichment per candidate.</b> For each unhealthy user we <code>await getPrimaryDebtPosition()</code> then <code>await getPrimaryCollateral()</code> in a <code>for</code> loop — and each of those does <em>more</em> sequential RPC (reserves list + per-reserve reads).</td><td><span class="path">aaveHelpers.js:1280</span>, <span class="path">:1009</span>, <span class="path">:810</span></td></tr>
+    <tr><td>D</td><td><b>~7 sequential RPC calls between detect and send.</b> Re-check HF → callStatic → estimateGas → getGasPrice → 2× oracle reads → getGasPrice again. Each is a public-RPC round-trip (~100–400ms) done one after another.</td><td><span class="path">bot.js:169</span>, <span class="path">:124</span>, <span class="path">:133</span>, <span class="path">:42</span>, <span class="path">:238</span></td></tr>
+    <tr><td>E</td><td><b>Legacy gas pricing.</b> <code>getGasPrice()</code> + a fixed gwei bump. No EIP-1559 priority fee — we can't outbid on inclusion priority.</td><td><span class="path">src/gas.js:5–10</span></td></tr>
+    <tr><td>F</td><td><b>Serial submission + blocking <code>tx.wait()</code>.</b> Candidates are attempted one at a time; we block on the receipt of #1 before even <em>starting</em> #2.</td><td><span class="path">bot.js:96</span>, <span class="path">:278</span></td></tr>
+    <tr><td>G</td><td><b>Public, rate-limited RPCs</b> (except Arbitrum on Alchemy). Higher per-call latency, throttling under per-block load, and no WebSocket push.</td><td><span class="path">src/chains.js</span> rpcUrls</td></tr>
+    <tr><td>H</td><td><b>Uncached static reads.</b> <code>getReservesList()</code>, ERC-20 <code>symbol()/decimals()</code> re-fetched on every enrichment though they almost never change.</td><td><span class="path">aaveHelpers.js:1322</span>, <span class="path">:1367</span></td></tr>
+  </tbody>
+</table>
+
+<!-- ============================================================ -->
+<div class="batch" id="b1">
+  <div class="b-no">1</div>
+  <div>
+    <h2 class="sec" style="margin:0">React per block, not per 15 seconds</h2>
+    <div class="b-meta">The single highest-leverage change. Cuts <b>Detect</b> from ≤15s to ~1 block. Ship after the current crash-fix is confirmed stable.</div>
+  </div>
+</div>
+
+<div class="card rec rank1">
+  <div class="rechead"><span class="num">1.1</span><h3>Per-block watchlist re-check</h3></div>
+  <div class="chips">
+    <span class="chip impact-hi">Impact: very high</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">Latency: ≤15s → ~1 block</span>
+  </div>
+  <p>Subscribe to new blocks and re-sweep <em>only the watchlist</em> (the near-threshold, non-dust wallets you already maintain) every block, instead of waiting for the 15s tick. The watchlist is tens–hundreds of addresses, so a Multicall3 sweep of it is ~100–300ms — cheap enough to run per block. Keep the full/warm/cold sweeps on their existing slower cadence to refresh the watchlist.</p>
+  <span class="lbl">Today</span>
+  <p class="now">Every chain does <code>while(true){ getUnhealthyPositions(); sleep(15s) }</code> — <span class="path">bot.js:90–110</span>. A position that crosses HF&lt;1 and is taken in the next block is gone ~14s before we look.</p>
+  <span class="lbl">Change</span>
+  <pre><span class="cm">// in runChainBot — add alongside the existing loop, behind a flag</span>
+if (process.env.BLOCK_TRIGGER === "true") {
+  let inFlight = false;
+  provider.on("block", async () =&gt; {
+    if (inFlight) return;                 <span class="cm">// drop overlapping ticks</span>
+    inFlight = true;
+    try {
+      const { watch } = loadWatchlist(chainConfig.key);
+      const hfs = await getUserHealthFactorsBatched([...watch], provider, chainConfig);
+      const liq = hfs.filter(h =&gt; h.healthFactor &lt; 1 &amp;&amp; h.totalDebtUsd &gt;= minDebtUsd)
+                     .sort((a,b) =&gt; a.healthFactor - b.healthFactor);
+      for (const c of liq) await attemptLiquidation(/* enrich + submit */, ctx);
+    } finally { inFlight = false; }
+  });
+}</pre>
+  <p class="why"><b>Why:</b> the bot's own design doc (<span class="path">docs/event-driven-triggers.md</span>) already recommends this as step one. It reuses the watchlist + Multicall3 you've built. <b>Caveat:</b> public RPCs may throttle <code>eth_blockNumber</code>/<code>getLogs</code> under per-block load (Arbitrum is already flaky) — pair this with private/WS RPCs (1.2) and keep the <code>inFlight</code> guard + backoff.</p>
+</div>
+
+<div class="card rec rank1">
+  <div class="rechead"><span class="num">1.2</span><h3>Private + WebSocket RPCs (the enabler)</h3></div>
+  <div class="chips">
+    <span class="chip impact-hi">Impact: high</span>
+    <span class="chip effort-lo">Effort: low (config + $)</span>
+    <span class="chip risk">Unblocks 1.1, 2.x, 4.x</span>
+  </div>
+  <p>Move each chain to a dedicated provider (Alchemy/Infura/QuickNode), preferring <code>wss://</code> endpoints. WebSocket gives push-based <code>block</code> events (no polling), lower latency, and headroom to run per-block sweeps across 5 chains without getting throttled. Arbitrum already uses Alchemy; extend to the rest.</p>
+  <span class="lbl">Today</span>
+  <p class="now">Public endpoints (<code>mainnet.base.org</code>, <code>api.avax.network</code>, etc.) in <span class="path">src/chains.js</span>; <code>StaticJsonRpcProvider</code> over HTTP in <span class="path">src/provider.js:7</span>. These throttle the historical backfill and <em>fail Arbitrum's contract-creation tx</em> — they won't sustain per-block load.</p>
+  <span class="lbl">Change</span>
+  <p class="fix">Add <code>&lt;CHAIN&gt;_RPC_URLS</code> (already supported by <span class="path">chains.js</span> env overrides) with private HTTPS, plus a <code>&lt;CHAIN&gt;_WS_URL</code> and a <code>WebSocketProvider</code> branch in <span class="path">src/provider.js</span> used for block subscriptions. Keep the HTTP provider for batch reads.</p>
+  <p class="why"><b>Why:</b> this is the prerequisite the design doc flags for <em>all</em> latency work. Without it, per-block triggers just get rate-limited. Lowest code effort of any item here — mostly config + a paid plan.</p>
+</div>
+
+<div class="card rec rank2">
+  <div class="rechead"><span class="num">1.3</span><h3>Decouple the per-chain loops into separate workers/processes</h3></div>
+  <div class="chips">
+    <span class="chip impact-md">Impact: medium-high</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">Removes cross-chain starvation</span>
+  </div>
+  <p>Run each chain in its own process (PM2 fork mode, Node <code>worker_threads</code>, or one container per chain) so a heavy Base cold sweep can't freeze Arbitrum's event loop and make us miss its block window.</p>
+  <span class="lbl">Today</span>
+  <p class="now"><span class="path">bot.js:70</span> runs all 5 chains in one event loop. A CPU-bound decode/encode burst on one chain delays every other chain's block handler — directly observed (Base's sweep spiking Optimism/Arbitrum cycle times to 48–73s).</p>
+  <span class="lbl">Change</span>
+  <p class="fix">Parameterize <code>bot.js</code> by a single <code>CHAIN</code> and launch N processes (compose already has the pattern; add one service per chain, or a PM2 ecosystem file). Each gets its own heap cap and its own RPC budget.</p>
+  <p class="why"><b>Why:</b> per-block reaction is worthless if another chain is hogging the loop at the moment your block arrives. This also isolates OOM/crash blast radius to one chain.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="batch" id="b2">
+  <div class="b-no">2</div>
+  <div>
+    <h2 class="sec" style="margin:0">Collapse the "Decide" path</h2>
+    <div class="b-meta">Cuts the ~7 serial RPC round-trips between detecting a target and broadcasting. Each saved round-trip is ~100–400ms on a public RPC; this is whole seconds.</div>
+  </div>
+</div>
+
+<div class="card rec rank2">
+  <div class="rechead"><span class="num">2.1</span><h3>Pre-compute everything you can; parallelize the rest</h3></div>
+  <div class="chips">
+    <span class="chip impact-hi">Impact: high</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">~1–3s off Decide</span>
+  </div>
+  <p>The current submit path is a chain of awaits, each waiting on the previous:</p>
+  <pre><span class="cm">// bot.js attemptLiquidation, today (sequential):</span>
+getUserHealthFactor()        <span class="cm">// re-check HF      — already known from the sweep!</span>
+→ callStatic.triggerLiquidation()
+→ estimateGas + getGasPrice
+→ oracle.getAssetPrice(native) + oracle.getAssetPrice(debt)
+→ getTransactionOverrides() → getGasPrice() <span class="cm">// AGAIN</span>
+→ send</pre>
+  <p>Fixes, in order of payoff:</p>
+  <ul class="tight">
+    <li><b>Drop the redundant HF re-check</b> (<span class="path">bot.js:169</span>). The streaming sweep just measured HF + total debt for this exact user moments ago; pass them through instead of a fresh <code>getUserAccountData</code> round-trip. <code>callStatic</code> is the real freshness gate anyway.</li>
+    <li><b>Fetch gas price once</b> and reuse it. It's fetched in <code>simulateLiquidation</code> (<span class="path">bot.js:133</span>), again in <code>getTransactionOverrides</code> (<span class="path">src/gas.js:5</span>), and again for the floor (<span class="path">bot.js:251</span>). One call, threaded through.</li>
+    <li><b>Cache the two oracle prices per chain</b> with a short TTL (native + debt asset, <span class="path">bot.js:42</span>). They move on Chainlink heartbeats, not per call — a 2–5s cache is safe and removes 2 reads from the critical path.</li>
+    <li><b>Parallelize what's left.</b> <code>callStatic</code> (the gate) and the gas/oracle reads (only needed if the gate passes) don't depend on each other — fire them with <code>Promise.all</code> and discard the gas work if the sim reverts.</li>
+  </ul>
+  <p class="why"><b>Why:</b> on a contested liquidation, 4–6 fewer serial public-RPC hops is plausibly 1–3 seconds — often the whole margin between landing in block N vs N+2.</p>
+</div>
+
+<div class="card rec rank2">
+  <div class="rechead"><span class="num">2.2</span><h3>Batch + parallelize candidate enrichment</h3></div>
+  <div class="chips">
+    <span class="chip impact-md">Impact: medium-high</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">Big win when multiple targets appear at once</span>
+  </div>
+  <p>When a price move makes several positions liquidatable in the same block, we enrich them <em>one at a time</em>, and each enrichment is itself serial RPC.</p>
+  <span class="lbl">Today</span>
+  <p class="now"><span class="path">aaveHelpers.js:1280</span> loops candidates serially; <code>getPrimaryCollateral</code>/<code>getPrimaryDebtPosition</code> call <code>getReservesList</code> then iterate reserves with per-reserve <code>getUserReserveData</code> awaits (<span class="path">:1009</span>, <span class="path">:1327</span>). For a user with 10 reserves that's ~10+ sequential reads — per candidate.</p>
+  <span class="lbl">Change</span>
+  <ul class="tight">
+    <li>Collapse per-reserve <code>getUserReserveData</code> across all reserves (and across all candidates) into <b>one Multicall3 batch</b> — you already have <code>aggregate3InBatches</code>.</li>
+    <li>Enrich candidates concurrently with the existing <code>mapWithConcurrency</code> helper (<span class="path">aaveHelpers.js:37</span>) instead of the serial <code>for</code>.</li>
+    <li>Prefer the Aave <b>UiPoolDataProvider</b> (<code>getUserReservesData</code>, ABI already imported at <span class="path">aaveHelpers.js:147</span>) — one call returns a user's full reserve picture, replacing the reserve-by-reserve loop.</li>
+  </ul>
+  <p class="why"><b>Why:</b> the lowest-HF target is the one every bot is racing for. If we burn 2s enriching candidate #3 before getting to the urgent #1 (they're sorted, but enrichment is still serial), we can lose it. Parallel enrichment + Multicall makes "found 5, ready to fire on all 5" near-instant.</p>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">2.3</span><h3>Cache static, rarely-changing reads</h3></div>
+  <div class="chips">
+    <span class="chip impact-lo">Impact: low-medium</span>
+    <span class="chip effort-lo">Effort: low</span>
+    <span class="chip risk">Removes warm-path round-trips</span>
+  </div>
+  <p>Memoize per chain: <code>getReservesList()</code> (changes only when Aave lists a reserve), and ERC-20 <code>symbol()</code>/<code>decimals()</code> (immutable). Refresh on a long interval or on miss.</p>
+  <p class="now"><span class="path">aaveHelpers.js:1322</span> and <span class="path">:1367</span> re-fetch these every time. Small individually, but they're on the enrichment path that runs during the race.</p>
+  <p class="why"><b>Why:</b> cheap, safe, and compounds with 2.2 — every cached read is one fewer round-trip while the clock is running.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="batch" id="b3">
+  <div class="b-no">3</div>
+  <div>
+    <h2 class="sec" style="margin:0">Win the "Deliver" step</h2>
+    <div class="b-meta">Getting included <em>this</em> block, with high enough priority to beat a competitor's tx in the same block.</div>
+  </div>
+</div>
+
+<div class="card rec rank2">
+  <div class="rechead"><span class="num">3.1</span><h3>EIP-1559 gas with an aggressive, tunable priority fee</h3></div>
+  <div class="chips">
+    <span class="chip impact-md">Impact: medium-high</span>
+    <span class="chip effort-lo">Effort: low</span>
+    <span class="chip risk">Inclusion priority</span>
+  </div>
+  <p>Switch from legacy <code>gasPrice</code> + fixed gwei bump to <code>maxFeePerGas</code> / <code>maxPriorityFeePerGas</code>, with the priority fee set as a (tunable) multiple of the network's recent priority fee. On a profitable liquidation, overpaying gas to win is correct — the bonus dwarfs the gas.</p>
+  <span class="lbl">Today</span>
+  <p class="now"><span class="path">src/gas.js:5–10</span>: <code>gasPrice = getGasPrice() + bumpGwei</code>. A fixed bump doesn't track contention and uses the legacy fee market — you can't outbid on priority when two bots target the same position.</p>
+  <span class="lbl">Change</span>
+  <p class="fix">Use <code>provider.getFeeData()</code> (already called in <span class="path">src/gas.js:18</span>), set <code>maxPriorityFeePerGas = max(networkTip × PRIORITY_MULTIPLE, floorTip)</code>, and size the cap so total gas stays under the computed profit. Gate the aggressiveness by the position's profitability so we only overpay when it pays.</p>
+  <p class="why"><b>Why:</b> when our tx and a competitor's land in the same block, ordering is (largely) by priority fee. A flat bump loses that auction; a profitability-scaled tip wins it.</p>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">3.2</span><h3>Local nonce management + non-blocking submission</h3></div>
+  <div class="chips">
+    <span class="chip impact-md">Impact: medium</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">Multiple targets / fire-and-confirm</span>
+  </div>
+  <p>Don't block the loop on <code>tx.wait()</code> before handling the next target, and manage the nonce locally so back-to-back sends don't collide or wait on a <code>getTransactionCount</code> round-trip each time.</p>
+  <span class="lbl">Today</span>
+  <p class="now"><span class="path">bot.js:96–102</span> awaits each <code>attemptLiquidation</code> (which awaits <code>tx.wait()</code> at <span class="path">:278</span>) before the next. With several same-block targets, candidate #2 waits for #1's receipt — by then #2 is gone.</p>
+  <span class="lbl">Change</span>
+  <p class="fix">Track <code>nonce</code> in memory per wallet/chain (seed from <code>getTransactionCount("pending")</code> once, increment locally), send all viable candidates without awaiting receipts, and confirm/log out-of-band. Keep a per-chain in-flight cap so we don't nonce-stampede.</p>
+  <p class="why"><b>Why:</b> turns "one liquidation per block, confirmed serially" into "fire on everything viable immediately." Pairs with 2.2 (parallel enrichment) and 1.3 (per-chain isolation).</p>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">3.3</span><h3>Trim contract gas (cheaper = faster to include, more margin to bid)</h3></div>
+  <div class="chips">
+    <span class="chip impact-lo">Impact: low-medium</span>
+    <span class="chip effort-md">Effort: medium (redeploy)</span>
+    <span class="chip risk">On-chain</span>
+  </div>
+  <p>The liquidation contract resolves the swap path <em>on-chain</em> at execution time: <code>_findFeeTier</code> calls <code>factory.getPool(...)</code> for up to 4 fee tiers, possibly ×2 for an intermediate hop (<span class="path">contracts/...sol:295–310</span>). That's several extra external calls inside the gas-metered tx.</p>
+  <span class="lbl">Change</span>
+  <p class="fix">Have the bot (which knows the assets) pass the resolved fee tier / full path in the call params, and use <code>preferredFeeTier</code> (already in the contract, <span class="path">:217</span>) so execution skips discovery. Pre-warm <code>preferredFeeTier</code> for the common collateral→debt pairs per chain.</p>
+  <p class="why"><b>Why:</b> lower gas per liquidation = larger profit margin to spend on priority fee (3.1) and a faster-to-validate tx. Lower priority than 3.1/3.2 since it needs a redeploy and the current contract works.</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="batch" id="b4">
+  <div class="b-no">4</div>
+  <div>
+    <h2 class="sec" style="margin:0">Frontier — react before HF&lt;1 is even visible</h2>
+    <div class="b-meta">Higher effort / infra-dependent. This is how the bots that always win actually win. Defer until Batches 1–3 prove the pipeline lands sizeable liquidations.</div>
+  </div>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">4.1</span><h3>Oracle-update triggers (price-feed driven)</h3></div>
+  <div class="chips">
+    <span class="chip impact-hi">Impact: high (ceiling)</span>
+    <span class="chip effort-hi">Effort: high</span>
+    <span class="chip risk">Most signal-efficient trigger</span>
+  </div>
+  <p>HFs drop because a <em>price</em> moved. Subscribe to <code>AnswerUpdated</code> on the Chainlink aggregators behind Aave's reserves; the instant a relevant feed updates, re-check exactly the borrowers exposed to that asset. This tells you to act on the same block the price changes — before a poller or even a per-block sweep would notice the HF cross.</p>
+  <p class="fix">Build a one-time map: reserve → <code>AaveOracle.getSourceOfAsset</code> → Chainlink aggregator, and a reserve → borrower index. On <code>AnswerUpdated</code>, sweep only the affected borrowers. (Doc: <span class="path">docs/event-driven-triggers.md</span> option 2.)</p>
+  <p class="why"><b>Why:</b> the precise, low-noise version of per-block sweeping. Needs WS RPCs (1.2) and the reserve→borrower index, so it follows Batch 1.</p>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">4.2</span><h3>Mempool / bundle submission (full MEV)</h3></div>
+  <div class="chips">
+    <span class="chip impact-hi">Impact: high (ceiling)</span>
+    <span class="chip effort-hi">Effort: very high</span>
+    <span class="chip risk">Needs dedicated node + relay</span>
+  </div>
+  <p>To truly tie the pros: watch the mempool for the oracle-update tx and back-run it in the same block via a bundle relay (Flashbots-style, where supported). This is the "land in the same block as the price update" capability.</p>
+  <p class="why"><b>Why deferred:</b> requires a dedicated node with mempool access and a bundle relay per chain — real infra + cost. Only justified once the bot demonstrably wins sizeable liquidations at the per-block tier. Listed for completeness; not recommended yet.</p>
+</div>
+
+<div class="card rec rank3">
+  <div class="rechead"><span class="num">4.3</span><h3>Pre-stage near-threshold positions (lower the candidate bar)</h3></div>
+  <div class="chips">
+    <span class="chip impact-md">Impact: medium</span>
+    <span class="chip effort-md">Effort: medium</span>
+    <span class="chip risk">Readiness, not raw latency</span>
+  </div>
+  <p>For wallets hovering just above HF 1.0, pre-fetch and cache their debt + collateral assets so that the moment they cross, the "Decide" step is already done and we go straight to simulate+send. This removes enrichment from the critical path for the targets most likely to flip.</p>
+  <p class="why"><b>Why:</b> complements 1.1. Per-block sweeping tells us <em>when</em>; pre-staging means there's nothing left to compute <em>when</em> it happens. The situation report explicitly flags "no pre-liquidation preparation for users hovering near liquidation" as a gap.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="sec" id="measure">Instrumentation</h2>
+<h3>How to know any of this worked</h3>
+<p>You can't tune what you don't measure. Before/while shipping, add timing so each clock is visible:</p>
+<ul class="tight">
+  <li><b>Per-stage timers:</b> log ms for detect→decide→deliver separately (the cycle timer at <span class="path">bot.js:94</span> only measures the whole sweep). Tag each with chain + block number.</li>
+  <li><b>Block lag:</b> on every detected liquidation, record <code>currentBlock − blockWhereHFcrossed</code>. This is the north-star metric — drive it toward 0–1.</li>
+  <li><b>Loss attribution:</b> when a watchlist wallet gets liquidated by someone else, log which block they landed in vs. when our sweep last saw it. Tells you whether you lost on Detect, Decide, or Deliver.</li>
+  <li><b>Win rate on sizeable targets:</b> reuse <span class="path">scripts/probeMeaningfulCoverage.js</span> as the scoreboard (≥$100 debt). That's the real KPI; latency work only matters if this climbs.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 class="sec" id="nots">Boundaries</h2>
+<h3>Non-goals (intentionally not on this list)</h3>
+<table>
+  <thead><tr><th>Not doing</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Rewriting to ethers v6 / viem</td><td>Real perf is in RPC round-trips and triggers, not the client lib. v5 is fine; a rewrite is risk without speed payoff.</td></tr>
+    <tr><td>Micro-optimizing the streaming sweep</td><td>Already memory-safe (~130MB at 210k) and off the critical race path. Leave it.</td></tr>
+    <tr><td>Lowering <code>SCAN_INTERVAL_MS</code> as the "fix"</td><td>A tighter poll still polls. It hammers RPCs without solving the structural problem — Batch 1 (events) replaces polling entirely.</td></tr>
+    <tr><td>Discovery/coverage changes</td><td>That's the current in-flight work (active-debt index, dust filter, deeper backfill). This brief assumes those land first; speed is the next layer.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout good">
+  <b>Suggested sequencing.</b> Confirm the current crash-fix + coverage upgrades are healthy in prod (no OOM, watchlists populating, sizeable coverage measured). <b>Then:</b> Batch 1.2 (private/WS RPCs) → 1.1 (per-block) → 1.3 (split processes) → 2.1/2.2 (collapse Decide) → 3.1 (EIP-1559) → 3.2 (nonce/async send). Treat Batch 4 as research, gated on Batches 1–3 showing wins. Ship each behind a flag, measure block-lag before/after, keep <code>TEST_MODE</code> as the safety valve.
+</div>
+
+<footer>
+  <p>Generated for the Aave liquidator project · 2026-06-03. Survey-only brief — no code changed. References point at the working tree as read this session. Pair with <span class="path">docs/event-driven-triggers.md</span> (the project's own latency design notes) and <span class="path">docs/liquidator-situation-report-2026-06-03.md</span> (current operational state).</p>
+</footer>
+
+</div>
+</body>
+</html>

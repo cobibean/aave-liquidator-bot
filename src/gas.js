@@ -2,7 +2,9 @@ const { ethers } = require("ethers");
 
 async function getTransactionOverrides(provider, chainConfig, options = {}) {
   const gasLimit = options.gasLimit || chainConfig.liquidationGasLimit;
-  const gasPrice = await provider.getGasPrice();
+  // Reuse a pre-fetched gas price when the caller already has one (avoids a
+  // redundant getGasPrice round-trip on the latency-critical submit path).
+  const gasPrice = options.gasPrice || (await provider.getGasPrice());
   const bump = ethers.utils.parseUnits(chainConfig.gasPriceBumpGwei || "0", "gwei");
 
   return {

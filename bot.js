@@ -2,10 +2,18 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
-const { getUnhealthyPositions, getUserHealthFactor } = require("./aaveHelpers");
+const {
+  getUnhealthyPositions,
+  getUserHealthFactor,
+  getUserHealthFactorsBatched,
+  enrichCandidateBatched,
+  getReservesListCached,
+  resolveChainMinDebtUsd,
+} = require("./aaveHelpers");
 const { getSelectedChainConfigs } = require("./src/chains");
 const { getTransactionOverrides } = require("./src/gas");
-const { createProvider } = require("./src/provider");
+const { createProvider, createBlockProvider } = require("./src/provider");
+const { loadWatchlist } = require("./src/borrowerStore");
 
 const requiredEnv = ["PRIVATE_KEY"];
 const missingEnv = requiredEnv.filter((name) => !process.env[name]);
@@ -30,6 +38,24 @@ const aaveLiquidatorABI = liquidatorArtifact.abi;
 
 const AAVE_ORACLE_ABI = ["function getAssetPrice(address asset) view returns (uint256)"];
 
+// Short-TTL cache for Aave oracle prices (native + debt asset), per chain+asset.
+// Chainlink feeds move on heartbeats (minutes) + deviation thresholds, so a few
+// seconds of staleness is safe and removes 2 oracle reads from nearly every
+// liquidation attempt in a burst. Default 5s; tune with ORACLE_PRICE_TTL_MS.
+const oraclePriceCache = new Map(); // `${chainKey}:${asset}` -> { price, fetchedAt }
+const ORACLE_PRICE_TTL_MS = parseInt(process.env.ORACLE_PRICE_TTL_MS || "5000", 10);
+
+async function getOraclePriceCached(oracle, chainKey, asset) {
+  const key = `${chainKey}:${String(asset).toLowerCase()}`;
+  const cached = oraclePriceCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < ORACLE_PRICE_TTL_MS) {
+    return cached.price;
+  }
+  const price = await oracle.getAssetPrice(asset);
+  oraclePriceCache.set(key, { price, fetchedAt: Date.now() });
+  return price;
+}
+
 // Computes a gas-aware minimum-profit floor in the debt asset's smallest units.
 // floor = gasCost(native) × nativeUsd / debtUsd × safetyMultiple, then + a small
 // fixed USD margin. Prices come from the Aave oracle (USD, 8 decimals) so no
@@ -39,9 +65,10 @@ async function computeMinProfitUnits({ provider, chainConfig, debtDecimals, estG
   try {
     if (!chainConfig.priceOracle || !chainConfig.wrappedNative) return null;
     const oracle = new ethers.Contract(chainConfig.priceOracle, AAVE_ORACLE_ABI, provider);
+    const chainKey = chainConfig.key || "default";
     const [nativeUsd, debtUsd] = await Promise.all([
-      oracle.getAssetPrice(chainConfig.wrappedNative),
-      oracle.getAssetPrice(chainConfig.debtAssetAddress),
+      getOraclePriceCached(oracle, chainKey, chainConfig.wrappedNative),
+      getOraclePriceCached(oracle, chainKey, chainConfig.debtAssetAddress),
     ]);
     if (debtUsd.isZero()) return null;
 
@@ -83,30 +110,120 @@ async function runChainBot(chainConfig) {
     console.warn(`⚠️ ${chainConfig.name}: AAVE_LIQUIDATOR_ADDRESS is not set for this chain.`);
   }
 
+  // Shared per-chain mutex. Both the periodic poll (full/warm/cold sweeps that
+  // maintain the watchlist) and the per-block watchlist re-check submit txs and
+  // hit the same RPC, so they must never run concurrently on one chain — that
+  // could double-submit the same liquidation or stampede the nonce. Whichever
+  // grabs the flag first runs; the other skips this tick.
+  const ctx = { provider, chainConfig, aaveLiquidatorContract };
+  const lock = { inFlight: false };
+
   // Each cycle does an incremental Borrow scan + a parallel HF sweep, so it is
   // cheap enough to run frequently. The first cycle pays a one-time backfill.
   const cycleMs = parseInt(process.env.SCAN_INTERVAL_MS || "15000", 10);
 
+  // Optional per-block watchlist trigger (Batch 1.1). Off by default. When on,
+  // re-checks ONLY the near-threshold watchlist every block (cheap), so a
+  // position crossing HF<1 is acted on within ~1 block instead of up to
+  // SCAN_INTERVAL_MS later. The slow poll below keeps maintaining the watchlist.
+  if (process.env.BLOCK_TRIGGER === "true") {
+    const blockProvider = createBlockProvider(chainConfig) || provider;
+    const usingWs = blockProvider !== provider;
+    console.log(`🔔 ${chainConfig.name}: per-block watchlist trigger ON (${usingWs ? "WebSocket push" : "HTTP polling"}).`);
+    blockProvider.on("block", async (blockNumber) => {
+      if (lock.inFlight) return; // a poll or prior block check is still running
+      lock.inFlight = true;
+      try {
+        await runWatchlistCheck(ctx, blockNumber);
+      } catch (error) {
+        console.error(`❌ ${chainConfig.name}: block-trigger error (block ${blockNumber}):`, error.message);
+      } finally {
+        lock.inFlight = false;
+      }
+    });
+  }
+
   while (true) {
     const cycleStart = Date.now();
+    if (lock.inFlight) {
+      // A block-trigger check is mid-flight; skip this poll tick rather than
+      // run concurrently. Try again next interval.
+      await delay(Math.max(cycleMs, 1000));
+      continue;
+    }
+    lock.inFlight = true;
     try {
       const opportunities = await getUnhealthyPositions(provider, chainConfig);
       console.log(`📌 ${chainConfig.name}: Found ${opportunities.length} liquidatable positions (cycle ${Date.now() - cycleStart}ms).`);
 
       for (const position of opportunities) {
-        await attemptLiquidation(position, {
-          provider,
-          chainConfig,
-          aaveLiquidatorContract,
-        });
+        await attemptLiquidation(position, ctx);
       }
     } catch (error) {
       console.error(`❌ ${chainConfig.name}: Error in main loop:`, error.message);
+    } finally {
+      lock.inFlight = false;
     }
 
     // Keep a steady cadence regardless of how long the cycle took.
     const elapsed = Date.now() - cycleStart;
     await delay(Math.max(cycleMs - elapsed, 1000));
+  }
+}
+
+// Per-block hot path: re-check ONLY the persisted watchlist (near-threshold,
+// non-dust wallets the sweep already identified). This is intentionally tiny and
+// fast — a single Multicall3 read of tens–hundreds of addresses (~100–300ms) —
+// so it can run every block. Anything that crosses HF<1 here is enriched (one
+// batched read each, concurrently) and attempted immediately. The full/warm/cold
+// sweeps in the poll loop are what keep the watchlist populated; this only reacts.
+async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract }, blockNumber) {
+  const chainKey = chainConfig.key || "default";
+  const { watch } = loadWatchlist(chainKey);
+  if (!watch || watch.size === 0) return;
+
+  const threshold = parseFloat(process.env.LIQUIDATION_THRESHOLD || "1.0");
+  const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
+
+  const t0 = Date.now();
+  const hfs = await getUserHealthFactorsBatched([...watch], provider, chainConfig);
+  const liq = hfs
+    .filter((h) => Number.isFinite(h.healthFactor) && h.healthFactor < threshold && h.totalDebtUsd >= minDebtUsd)
+    .sort((a, b) => a.healthFactor - b.healthFactor);
+
+  if (liq.length === 0) {
+    if (process.env.VERBOSE_HEALTH_LOGS === "true") {
+      console.log(`   ⛓️ ${chainConfig.name}: block ${blockNumber} watchlist ${watch.size} clean (${Date.now() - t0}ms).`);
+    }
+    return;
+  }
+
+  console.log(`🔔 ${chainConfig.name}: block ${blockNumber} — ${liq.length} watchlist position(s) below ${threshold} (${Date.now() - t0}ms).`);
+
+  // Enrich the urgent ones concurrently (each a single batched read), then
+  // attempt in lowest-HF-first order. attemptLiquidation honors TEST_MODE.
+  const reserves = chainConfig.protocolDataProvider
+    ? await getReservesListCached(provider, chainConfig)
+    : [];
+  const minDebtToCover = parseFloat(process.env.MIN_DEBT_TO_COVER || "0.099");
+
+  for (const { user, healthFactor, totalDebtUsd } of liq) {
+    let position;
+    try {
+      position = await enrichCandidateBatched(user, provider, chainConfig, reserves);
+    } catch (error) {
+      console.warn(`⚠️ ${chainConfig.name}: enrichment failed for ${user}: ${error.message}`);
+      continue;
+    }
+    if (!position) continue;
+
+    const debtInUnits = parseFloat(ethers.utils.formatUnits(position.debtAmount, position.debtDecimals));
+    if (debtInUnits < minDebtToCover) continue;
+
+    await attemptLiquidation(
+      { ...position, user, healthFactor, totalDebtUsd },
+      { provider, chainConfig, aaveLiquidatorContract }
+    );
   }
 }
 
@@ -119,7 +236,7 @@ function delay(ms) {
 // This is the bot-side half of the profitability gate; the hardened contract's
 // minProfit floor is the on-chain half. Works against both the current and
 // hardened contract (both expose triggerLiquidation with the same signature).
-async function simulateLiquidation(contract, { debtAsset, debtToCover, user, collateralAsset, provider, chainConfig }) {
+async function simulateLiquidation(contract, { debtAsset, debtToCover, user, collateralAsset, provider, chainConfig, gasPrice }) {
   try {
     await contract.callStatic.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset);
   } catch (error) {
@@ -128,13 +245,15 @@ async function simulateLiquidation(contract, { debtAsset, debtToCover, user, col
   }
 
   // Best-effort gas estimate so we can log/compare cost. Non-fatal if it fails.
+  // Reuse the caller's gas price when provided (one round-trip for the whole
+  // submit path instead of re-fetching it here).
   let estGasCostNative = null;
   try {
-    const [gasEstimate, gasPrice] = await Promise.all([
+    const [gasEstimate, livePrice] = await Promise.all([
       contract.estimateGas.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset),
-      provider.getGasPrice(),
+      gasPrice ? Promise.resolve(gasPrice) : provider.getGasPrice(),
     ]);
-    estGasCostNative = ethers.utils.formatEther(gasEstimate.mul(gasPrice));
+    estGasCostNative = ethers.utils.formatEther(gasEstimate.mul(livePrice));
   } catch (_) {
     // estimateGas can fail even when callStatic passes (e.g. gas heuristics);
     // don't block on it — the callStatic success is the real gate.
@@ -150,7 +269,8 @@ async function attemptLiquidation({
   debtAmount,
   debtDecimals = 6,
   debtSymbol = "debt asset",
-  collateralAsset
+  collateralAsset,
+  healthFactor
 }, {
   provider,
   chainConfig,
@@ -165,8 +285,16 @@ async function attemptLiquidation({
     collateralAsset
   });
 
-  // Re-check user health factor (pass both user and provider)
-  const latestHealthFactor = await getUserHealthFactor(user, provider, chainConfig);
+  // Use the health factor already measured by the sweep (passed through) instead
+  // of a fresh getUserAccountData round-trip on the critical path. The callStatic
+  // simulation below is the REAL freshness gate: if the position has healed or
+  // become non-liquidatable since the sweep, triggerLiquidation reverts and we
+  // skip without spending gas. So this HF is only used for the partial-vs-full
+  // close-factor decision, where sweep-time HF is plenty accurate. Falls back to
+  // a live read only if the caller didn't supply one (e.g. legacy call sites).
+  const latestHealthFactor = Number.isFinite(healthFactor)
+    ? healthFactor
+    : await getUserHealthFactor(user, provider, chainConfig);
   console.log(`${chainConfig.name}: Health factor for ${user}: ${latestHealthFactor}`);
   if (latestHealthFactor > 1.0) {
     console.log(`⏳ Skipping ${user} (HF: ${latestHealthFactor}).`);
@@ -177,7 +305,7 @@ async function attemptLiquidation({
   // For example, if HF is above 0.95, only 50% of the debt can be liquidated.
   const CLOSE_FACTOR_HF_THRESHOLD = 0.95;
   let debtToCover = debtAmount;
-  
+
   if (latestHealthFactor > CLOSE_FACTOR_HF_THRESHOLD) {
     // Liquidate only 50% of the debt.
     debtToCover = debtAmount.div(2); // BigNumber division (rounding down)
@@ -189,6 +317,16 @@ async function attemptLiquidation({
   if (!aaveLiquidatorContract) {
     console.warn(`${chainConfig.name}: No liquidator contract configured; skipping.`);
     return;
+  }
+
+  // Fetch the live gas price ONCE for the whole submit path. It was previously
+  // fetched up to three times (simulate, floor preview, overrides); thread it
+  // through instead. Non-fatal if it fails — downstream falls back to a fresh read.
+  let sharedGasPrice = null;
+  try {
+    sharedGasPrice = await provider.getGasPrice();
+  } catch (_) {
+    // leave null; helpers will fetch their own.
   }
 
   // PROFITABILITY PRE-CHECK (defense-in-depth, part 1 of 2).
@@ -205,6 +343,7 @@ async function attemptLiquidation({
     collateralAsset,
     provider,
     chainConfig,
+    gasPrice: sharedGasPrice,
   });
   if (!profitCheck.ok) {
     console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${profitCheck.reason}).`);
@@ -222,7 +361,7 @@ async function attemptLiquidation({
       chainConfig,
       debtDecimals,
       estGasUnits: ethers.BigNumber.from(chainConfig.liquidationGasLimit),
-      gasPrice: await provider.getGasPrice(),
+      gasPrice: sharedGasPrice || (await provider.getGasPrice()),
     });
     console.log("TEST_MODE enabled: pre-check passed but skipping submission.", {
       chain: chainConfig.name,
@@ -237,6 +376,7 @@ async function attemptLiquidation({
   try {
     const overrides = await getTransactionOverrides(provider, chainConfig, {
       gasLimit: chainConfig.liquidationGasLimit,
+      gasPrice: sharedGasPrice, // reuse the single fetch; helper falls back if null
     });
 
     // Compute a gas-aware profit floor and pass it on hardened chains. The

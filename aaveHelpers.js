@@ -1,12 +1,26 @@
 const { ethers } = require('ethers');
 const fetch = require("node-fetch");
-const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist } = require("./src/borrowerStore");
-const { aggregate3InBatches } = require("./src/multicall");
+const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist, loadActiveDebt, saveActiveDebt } = require("./src/borrowerStore");
+const { aggregate3InBatches, aggregate3Streaming } = require("./src/multicall");
 
 // Interface used to encode/decode getUserAccountData calls for Multicall3.
 const POOL_IFACE = new ethers.utils.Interface([
   "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
 ]);
+
+// Interface for ProtocolDataProvider.getUserReserveData, used to batch a user's
+// per-reserve debt/collateral reads into ONE Multicall3 round-trip during
+// enrichment (instead of one serial RPC call per reserve, per candidate).
+const DATA_PROVIDER_IFACE = new ethers.utils.Interface([
+  "function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)",
+]);
+
+// Per-chain caches for rarely-changing reads, so enrichment doesn't re-fetch
+// them once per candidate during a race. Keyed by chain. Reserves list changes
+// only when Aave lists/drops a reserve; ERC-20 symbol/decimals are immutable.
+const reservesListCache = new Map(); // chainKey -> { reserves, fetchedAt }
+const assetMetaCache = new Map(); // `${chainKey}:${asset.toLowerCase()}` -> { symbol, decimals }
+const RESERVES_CACHE_TTL_MS = parseInt(process.env.RESERVES_CACHE_TTL_MS || "300000", 10); // 5 min
 
 const DEFAULT_SUBGRAPH_URL = "https://metisapi.0xgraph.xyz/subgraphs/name/aave/protocol-v3-metis";
 const BORROW_EVENT_ABI = [
@@ -75,25 +89,72 @@ async function getUserHealthFactorsBatched(users, provider, chainConfig = {}) {
   const batchSize = parseInt(process.env.MULTICALL_BATCH_SIZE || "300", 10);
   const raw = await aggregate3InBatches(provider, calls, batchSize);
 
-  return users.map((user, i) => {
-    const entry = raw[i];
-    if (!entry || !entry.success || !entry.returnData || entry.returnData === "0x") {
-      return { user, healthFactor: Infinity, totalDebtUsd: 0 };
+  return users.map((user, i) => decodeAccountData(user, raw[i]));
+}
+
+// Decodes one Multicall3 getUserAccountData entry into { user, healthFactor,
+// totalDebtUsd }. A missing/failed/empty entry (no debt, bad address, reverted
+// call) yields a huge HF + zero debt so it's treated as healthy/skip. Shared by
+// both the materialized (getUserHealthFactorsBatched) and streaming sweep paths.
+function decodeAccountData(user, entry) {
+  if (!entry || !entry.success || !entry.returnData || entry.returnData === "0x") {
+    return { user, healthFactor: Infinity, totalDebtUsd: 0 };
+  }
+  try {
+    const decoded = POOL_IFACE.decodeFunctionResult("getUserAccountData", entry.returnData);
+    const hf = parseFloat(ethers.utils.formatUnits(decoded.healthFactor, 18));
+    // Aave v3 base currency is USD with 8 decimals (verified on-chain).
+    const totalDebtUsd = parseFloat(ethers.utils.formatUnits(decoded.totalDebtBase, 8));
+    return {
+      user,
+      healthFactor: Number.isFinite(hf) ? hf : Infinity,
+      totalDebtUsd: Number.isFinite(totalDebtUsd) ? totalDebtUsd : 0,
+    };
+  } catch (error) {
+    return { user, healthFactor: Infinity, totalDebtUsd: 0 };
+  }
+}
+
+// Memory-safe health-factor sweep for large borrower sets. Encodes one batch of
+// getUserAccountData calls at a time, fetches it via Multicall3, decodes it, and
+// hands each decoded { user, healthFactor, totalDebtUsd } to `onUser` — then
+// DISCARDS the batch before building the next. Peak heap is O(batchSize) rather
+// than O(users), which is what lets Base's ~210k-borrower full sweep complete
+// instead of exhausting V8's heap. Returns the number of users swept.
+//
+// opts.onBatchDone(usersSweptSoFar) — optional, awaited after each batch. Lets a
+// long full sweep checkpoint progress (e.g. persist the partial watchlist) so a
+// mid-sweep crash resumes near where it stopped instead of restarting from zero.
+async function sweepHealthFactorsStreaming(users, provider, chainConfig, onUser, opts = {}) {
+  const poolAddress = getPoolAddress(chainConfig);
+  if (!poolAddress || users.length === 0) {
+    for (const user of users) onUser({ user, healthFactor: 999, totalDebtUsd: 0 });
+    return users.length;
+  }
+
+  const batchSize = parseInt(process.env.MULTICALL_BATCH_SIZE || "300", 10);
+  const onBatchDone = typeof opts.onBatchDone === "function" ? opts.onBatchDone : null;
+
+  // Build the full call list once (each entry is small per-user calldata), then
+  // stream it through Multicall3 one batch at a time. aggregate3Streaming fetches
+  // a batch, hands us its results, and discards them before the next — so the
+  // only large structures alive are `calls` (input) and `users` (the caller's
+  // borrower list); the heavy decoded results never accumulate.
+  const calls = users.map((user) => ({
+    target: poolAddress,
+    allowFailure: true,
+    callData: POOL_IFACE.encodeFunctionData("getUserAccountData", [user]),
+  }));
+
+  await aggregate3Streaming(provider, calls, batchSize, async (batchResults, startIndex) => {
+    for (let j = 0; j < batchResults.length; j++) {
+      const user = users[startIndex + j];
+      onUser(decodeAccountData(user, batchResults[j]));
     }
-    try {
-      const decoded = POOL_IFACE.decodeFunctionResult("getUserAccountData", entry.returnData);
-      const hf = parseFloat(ethers.utils.formatUnits(decoded.healthFactor, 18));
-      // Aave v3 base currency is USD with 8 decimals (verified on-chain).
-      const totalDebtUsd = parseFloat(ethers.utils.formatUnits(decoded.totalDebtBase, 8));
-      return {
-        user,
-        healthFactor: Number.isFinite(hf) ? hf : Infinity,
-        totalDebtUsd: Number.isFinite(totalDebtUsd) ? totalDebtUsd : 0,
-      };
-    } catch (error) {
-      return { user, healthFactor: Infinity, totalDebtUsd: 0 };
-    }
+    if (onBatchDone) await onBatchDone(startIndex + batchResults.length);
   });
+
+  return users.length;
 }
 
 // ABI for Aave's UI Pool Data Provider (if needed for other functions)
@@ -1054,120 +1115,234 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     const threshold = parseFloat(process.env.LIQUIDATION_THRESHOLD || "1.0");
     const watchlistHf = parseFloat(process.env.WATCHLIST_HF || "1.25");
     const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "20", 10);
-    const minDebtUsd = parseFloat(process.env.MIN_DEBT_USD || "100");
+    const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "8", 10);
+    const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
     const chainKey = chainConfig.key || "default";
 
-    // Phase 1: STRATIFIED + BATCHED health-factor sweep.
+    // Phase 1: STRATIFIED + BATCHED health-factor sweep, three tiers by cost.
     //
-    // Checking every borrower every cycle does not scale — a full sweep of
-    // Base's ~6.6k borrowers took ~17 min on the droplet. Instead:
-    //   - Every cycle: sweep only the "watchlist" (wallets last seen with
-    //     HF < WATCHLIST_HF) — small and fast, this is where liquidations come from.
-    //   - Every FULL_SWEEP_EVERY_N cycles (or when the watchlist is empty/first
-    //     run): sweep the full borrower set to refresh the watchlist.
-    // All reads go through Multicall3 so even the full sweep is a few RPC calls.
+    // Checking every ever-borrowed wallet every cycle does not scale (Base has
+    // ~210k ever-borrowed, but only a few thousand carry debt right now). All
+    // reads go through Multicall3 and STREAM batch-by-batch (flat heap), so the
+    // tiers are about RPC time, not memory:
+    //   - WATCHLIST (every cycle): wallets last seen with HF < WATCHLIST_HF and
+    //     non-dust debt — tiny, fast; this is where liquidations actually come from.
+    //   - WARM / "full" (every FULL_SWEEP_EVERY_N cycles, or watchlist empty):
+    //     the active-debt index (wallets observed with totalDebtBase > 0). This
+    //     refreshes the watchlist from the only wallets that could ever be
+    //     liquidatable, at a fraction of the all-borrower cost.
+    //   - COLD (every COLD_SWEEP_EVERY_N warm sweeps, or index empty): the entire
+    //     borrower set. The only sweep that pays the full ~210k cost; it rebuilds
+    //     the active-debt index to catch wallets that took on debt without a
+    //     Borrow event we'd see incrementally.
     const { watch, cyclesSinceFullSweep } = loadWatchlist(chainKey);
-    const doFullSweep = watch.size === 0 || cyclesSinceFullSweep >= fullSweepEveryN;
+    const { active, warmSweepsSinceCold } = loadActiveDebt(chainKey);
 
-    // On a watchlist cycle, also include any borrowers discovered THIS cycle by
-    // the incremental scan — otherwise a freshly-opened risky position would not
-    // be health-checked until the next full sweep (up to FULL_SWEEP_EVERY_N cycles).
+    // On a watchlist/warm cycle, also include borrowers discovered THIS cycle by
+    // the incremental Borrow scan — a freshly-opened risky position should be
+    // health-checked now, not delayed up to FULL_SWEEP_EVERY_N cycles.
     const newThisScan = borrowers.newThisScan instanceof Set ? borrowers.newThisScan : new Set();
-    const sweepSet = doFullSweep
-      ? borrowers
-      : borrowers.filter((b) => {
-          const key = b.toLowerCase();
-          return watch.has(key) || newThisScan.has(key);
-        });
-    if (!doFullSweep && newThisScan.size > 0) {
+
+    const needFullSweep = watch.size === 0 || cyclesSinceFullSweep >= fullSweepEveryN;
+    const doColdSweep = needFullSweep && (active.size === 0 || warmSweepsSinceCold >= coldSweepEveryN);
+    const doWarmSweep = needFullSweep && !doColdSweep;
+    const sweepType = doColdSweep ? "COLD" : doWarmSweep ? "WARM" : "watchlist";
+
+    let sweepSet;
+    if (doColdSweep) {
+      sweepSet = borrowers;
+    } else if (doWarmSweep) {
+      // Active-debt index ∪ this cycle's new borrowers (latter not yet indexed).
+      const warmSet = new Set(active);
+      for (const b of newThisScan) warmSet.add(b);
+      sweepSet = Array.from(warmSet);
+    } else {
+      sweepSet = borrowers.filter((b) => {
+        const key = b.toLowerCase();
+        return watch.has(key) || newThisScan.has(key);
+      });
+    }
+    if (!doColdSweep && newThisScan.size > 0) {
       console.log(`   ↳ ${chainConfig.name}: +${newThisScan.size} newly-discovered borrower(s) added to this sweep.`);
     }
 
     console.log(
-      `✅ ${chainConfig.name}: ${doFullSweep ? "FULL" : "watchlist"} HF sweep of ${sweepSet.length}` +
-        ` (known ${borrowers.length}, watch ${watch.size}, cyclesSinceFull ${cyclesSinceFullSweep}).`
+      `✅ ${chainConfig.name}: ${sweepType} HF sweep of ${sweepSet.length}` +
+        ` (known ${borrowers.length}, active-debt ${active.size}, watch ${watch.size},` +
+        ` cyclesSinceFull ${cyclesSinceFullSweep}, warmSinceCold ${warmSweepsSinceCold}).`
     );
 
     const t0 = Date.now();
-    const hfResults = await getUserHealthFactorsBatched(sweepSet, provider, chainConfig);
 
-    // Rebuild the watchlist from this sweep. On a full sweep this is the new
-    // truth. On a watchlist-only sweep we keep wallets that are still near
-    // threshold (drop any that recovered) — the next full sweep re-adds new ones.
-    // Watchlist membership also requires non-dust debt (>= minDebtUsd): there's
-    // no point re-checking a $5 position every cycle when we'd never liquidate it.
-    // This keeps the hot path small even when the borrower set is huge (measured:
-    // unfiltered watchlist was 1,340 on Arbitrum; debt-filtered it is far smaller).
+    // STREAMING fold: instead of materializing one { user, hf, debt } object per
+    // borrower (fatal on Base's ~210k set — three full-size arrays at once blew
+    // V8's heap), the sweep hands us one decoded result at a time and we fold it
+    // straight into the only things we keep: the next watchlist and the unhealthy
+    // candidate list. Both stay tiny (near-threshold-with-debt wallets are a few
+    // hundred; HF<1-with-debt candidates are typically single digits), so peak
+    // heap is O(batchSize + watchlist + candidates), independent of borrower count.
+    //
+    //   nextWatch  — wallets still near threshold (HF < WATCHLIST_HF) AND carrying
+    //                non-dust debt (>= minDebtUsd). On a full sweep this is the new
+    //                truth; on a watchlist-only sweep, recovered wallets drop out
+    //                and the next full sweep re-adds new ones. We never re-check a
+    //                $5 position every cycle when we'd never liquidate it.
+    //   candidates — genuinely-unhealthy (HF < threshold), non-dust positions to
+    //                enrich + attempt, sorted lowest-HF-first (most urgent / most
+    //                contested) below.
     const nextWatch = new Set();
-    for (const { user, healthFactor, totalDebtUsd } of hfResults) {
-      if (Number.isFinite(healthFactor) && healthFactor < watchlistHf && totalDebtUsd >= minDebtUsd) {
-        nextWatch.add(user.toLowerCase());
+    const candidates = [];
+    let belowThreshold = 0;
+    // Active-debt wallets observed THIS sweep (totalDebtUsd > 0). On a cold sweep
+    // this becomes the new active-debt index (the truth for "who has debt"); on a
+    // warm sweep it's used to prune wallets that fully repaid.
+    const nextActive = new Set();
+
+    // On a long full sweep (Base ~210k cold), persist the partial watchlist every
+    // N batches so a crash/restart mid-sweep keeps the near-threshold wallets
+    // found so far instead of leaving an empty file — which is exactly what
+    // trapped Base in a restart loop (watchlist-base.json never existed). We
+    // checkpoint with cyclesSinceFullSweep = fullSweepEveryN so a partial sweep is
+    // treated as INCOMPLETE and redone next start; only the clean post-sweep save
+    // resets to 0. Watchlist cycles are tiny and skip checkpointing. Progress logs
+    // gated by VERBOSE_HEALTH_LOGS.
+    const checkpointEveryBatches = parseInt(process.env.SWEEP_CHECKPOINT_BATCHES || "50", 10);
+    const batchSize = parseInt(process.env.MULTICALL_BATCH_SIZE || "300", 10);
+    let lastCheckpointBatch = 0;
+
+    await sweepHealthFactorsStreaming(
+      sweepSet,
+      provider,
+      chainConfig,
+      ({ user, healthFactor, totalDebtUsd }) => {
+        if (!Number.isFinite(healthFactor)) return;
+        if (totalDebtUsd > 0) {
+          nextActive.add(user.toLowerCase());
+        }
+        if (healthFactor < watchlistHf && totalDebtUsd >= minDebtUsd) {
+          nextWatch.add(user.toLowerCase());
+        }
+        if (healthFactor < threshold) {
+          belowThreshold++;
+          if (totalDebtUsd >= minDebtUsd) {
+            candidates.push({ user, healthFactor, totalDebtUsd });
+          }
+        }
+      },
+      {
+        onBatchDone: needFullSweep
+          ? (sweptSoFar) => {
+              const batchNum = Math.ceil(sweptSoFar / batchSize);
+              if (sweptSoFar < sweepSet.length && batchNum - lastCheckpointBatch >= checkpointEveryBatches) {
+                lastCheckpointBatch = batchNum;
+                saveWatchlist(chainKey, nextWatch, fullSweepEveryN);
+                logVerbose(`   …${chainConfig.name}: ${sweepType} checkpoint ${sweptSoFar}/${sweepSet.length} (watch ${nextWatch.size}, active ${nextActive.size}).`);
+              }
+            }
+          : undefined,
       }
-    }
-    if (!doFullSweep) {
-      // Preserve watchlist members we didn't just re-check (shouldn't happen,
-      // sweepSet == watch here, but be safe) so we don't silently forget them.
+    );
+
+    if (!needFullSweep) {
+      // Watchlist cycle: preserve watchlist members we didn't just re-check
+      // (shouldn't happen — sweepSet ⊇ watch here — but be safe).
       for (const w of watch) {
-        if (!sweepSet.includes(w) && !nextWatch.has(w)) nextWatch.add(w);
+        if (!nextWatch.has(w)) nextWatch.add(w);
       }
     }
-    saveWatchlist(chainKey, nextWatch, doFullSweep ? 0 : cyclesSinceFullSweep + 1);
+    saveWatchlist(chainKey, nextWatch, needFullSweep ? 0 : cyclesSinceFullSweep + 1);
 
-    // Keep only genuinely-unhealthy positions and attempt the most urgent
-    // (lowest HF) first — those are the ones a competing bot is also racing for.
-    // Apply the USD dust floor HERE using totalDebtBase from the same sweep: most
-    // real liquidations are sub-$100 dust where gas exceeds the bonus, so we drop
-    // them before doing any expensive per-user enrichment.
-    const candidates = hfResults
-      .filter((entry) => Number.isFinite(entry.healthFactor) && entry.healthFactor < threshold)
-      .filter((entry) => entry.totalDebtUsd >= minDebtUsd)
-      .sort((a, b) => a.healthFactor - b.healthFactor);
+    // Maintain the active-debt index. Only the COLD sweep — which reads every
+    // borrower — can authoritatively DROP a wallet (it's the only sweep that can
+    // distinguish "repaid" from "not in this sweep set"). Warm/watchlist sweeps
+    // only UNION newly-seen-with-debt wallets in; they never prune, because a
+    // wallet absent from nextActive on those sweeps just wasn't swept (or had a
+    // transient failed read), not necessarily debt-free. This keeps the index
+    // from eroding to the hot subset between cold sweeps.
+    //   COLD: replace with the complete truth; reset the cold-sweep counter.
+    //   WARM: union in new debt holders; bump warmSweepsSinceCold toward the next
+    //         cold sweep that will prune.
+    //   WATCHLIST: union in new debt holders (e.g. a new borrower); counter unchanged.
+    if (doColdSweep) {
+      saveActiveDebt(chainKey, nextActive, 0);
+    } else {
+      // Union new debt holders into the index. Warm sweeps always persist (the
+      // counter advances); watchlist cycles persist only when they actually add
+      // a wallet, so we don't rewrite Base's multi-thousand-entry index every
+      // cycle for no change.
+      const merged = new Set(active);
+      let added = 0;
+      for (const a of nextActive) { if (!merged.has(a)) { merged.add(a); added++; } }
+      if (doWarmSweep) {
+        saveActiveDebt(chainKey, merged, warmSweepsSinceCold + 1);
+      } else if (added > 0) {
+        saveActiveDebt(chainKey, merged, warmSweepsSinceCold);
+      }
+    }
 
-    const belowThreshold = hfResults.filter((e) => Number.isFinite(e.healthFactor) && e.healthFactor < threshold).length;
+    // Attempt the most urgent (lowest HF) first — those are the ones a competing
+    // bot is also racing for.
+    candidates.sort((a, b) => a.healthFactor - b.healthFactor);
+
     console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}.`);
 
     // Phase 2: enrich only the unhealthy, non-dust candidates (debt + collateral
     // lookups are heavier, so we do them on the short list, in priority order).
+    //
+    // Each candidate's per-reserve debt/collateral reads are collapsed into ONE
+    // Multicall3 batch (enrichCandidateBatched), and candidates are enriched
+    // CONCURRENTLY (mapWithConcurrency) instead of one-at-a-time. When several
+    // positions go liquidatable in the same block, "found N → ready on all N" is
+    // near-instant rather than N serial chains of RPC calls — the lowest-HF
+    // target (the one every bot is racing for) is no longer stuck behind the
+    // enrichment of the ones below it. Results are reassembled in the original
+    // lowest-HF-first priority order.
     const minDebtToCover = parseFloat(process.env.MIN_DEBT_TO_COVER || "0.099");
-    const unhealthyPositions = [];
+    const enrichConcurrency = parseInt(process.env.ENRICH_CONCURRENCY || "10", 10);
+    const reserves = chainConfig.protocolDataProvider
+      ? await getReservesListCached(provider, chainConfig)
+      : [];
 
-    for (const { user, healthFactor, totalDebtUsd } of candidates) {
-      const debtPosition = await getPrimaryDebtPosition(user, provider, chainConfig);
-      const debtAsset = debtPosition.debtAsset;
-      const debtAmount = debtPosition.debtAmount;
-
-      console.log(`👀 ${user}: HF ${healthFactor.toFixed(4)}, ~$${totalDebtUsd.toFixed(0)} total debt; primary ${ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals)} ${debtPosition.debtSymbol}`);
-      if (debtAmount.eq(ethers.constants.Zero)) {
-        console.log(`⚠️ Skipping ${user}: No remaining debt.`);
-        continue;
+    const enriched = await mapWithConcurrency(candidates, enrichConcurrency, async ({ user, healthFactor, totalDebtUsd }) => {
+      let position;
+      try {
+        position = await enrichCandidateBatched(user, provider, chainConfig, reserves);
+      } catch (error) {
+        console.warn(`⚠️ Enrichment failed for ${user}: ${error.message}`);
+        return null;
       }
+      if (!position) {
+        // No remaining debt or no valid collateral — mirrors the prior skips.
+        console.log(`⚠️ Skipping ${user}: no remaining debt or no valid collateral.`);
+        return null;
+      }
+
+      const { debtAsset, debtAmount, debtDecimals, debtSymbol, collateralAsset } = position;
+      console.log(`👀 ${user}: HF ${healthFactor.toFixed(4)}, ~$${totalDebtUsd.toFixed(0)} total debt; primary ${ethers.utils.formatUnits(debtAmount, debtDecimals)} ${debtSymbol}`);
 
       // Secondary per-asset floor (token units) as a backstop.
-      const debtInUnits = parseFloat(ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals));
+      const debtInUnits = parseFloat(ethers.utils.formatUnits(debtAmount, debtDecimals));
       if (debtInUnits < minDebtToCover) {
-        console.log(`⚠️ Skipping ${user}: Debt too small (${debtInUnits} ${debtPosition.debtSymbol} < ${minDebtToCover}).`);
-        continue;
+        console.log(`⚠️ Skipping ${user}: Debt too small (${debtInUnits} ${debtSymbol} < ${minDebtToCover}).`);
+        return null;
       }
 
-      const collateralAsset = await getPrimaryCollateral(user, provider, chainConfig);
-      if (!collateralAsset) {
-        console.warn(`⚠️ Skipping ${user}: No valid collateral.`);
-        continue;
-      }
-
-      unhealthyPositions.push({
+      console.log(`🔥 Found liquidatable position: ${user} | HF: ${healthFactor} | Debt: ${ethers.utils.formatUnits(debtAmount, debtDecimals)} ${debtSymbol}`);
+      return {
         user,
         debtAsset,
         debtAmount,
-        debtDecimals: debtPosition.debtDecimals,
-        debtSymbol: debtPosition.debtSymbol,
+        debtDecimals,
+        debtSymbol,
         collateralAsset,
         healthFactor,
         totalDebtUsd,
-      });
+      };
+    });
 
-      console.log(`🔥 Found liquidatable position: ${user} | HF: ${healthFactor} | Debt: ${ethers.utils.formatUnits(debtAmount, debtPosition.debtDecimals)} ${debtPosition.debtSymbol}`);
-    }
+    // candidates was already sorted lowest-HF-first; mapWithConcurrency preserves
+    // input order, so filtering nulls keeps that priority ordering.
+    const unhealthyPositions = enriched.filter(Boolean);
 
     console.log(`📌 Found ${unhealthyPositions.length} liquidatable positions.`);
     return unhealthyPositions;
@@ -1176,6 +1351,117 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
 async function getReservesList(provider, chainConfig = {}) {
     const pool = new ethers.Contract(getPoolAddress(chainConfig), POOL_ABI, provider);
     return pool.getReservesList();
+}
+
+// Cached reserves list. The set of reserves changes only when Aave governance
+// lists/drops one, so re-fetching it for every candidate during a liquidation
+// race is wasted round-trips. Cached per chain with a long TTL; refreshes lazily.
+async function getReservesListCached(provider, chainConfig = {}) {
+    const chainKey = chainConfig.key || "default";
+    const cached = reservesListCache.get(chainKey);
+    if (cached && Date.now() - cached.fetchedAt < RESERVES_CACHE_TTL_MS) {
+      return cached.reserves;
+    }
+    const reserves = await getReservesList(provider, chainConfig);
+    reservesListCache.set(chainKey, { reserves, fetchedAt: Date.now() });
+    return reserves;
+}
+
+// Cached ERC-20 metadata (symbol/decimals are immutable). The configured debt
+// asset short-circuits without an RPC call (matches getAssetMetadata's behavior).
+async function getAssetMetadataCached(asset, provider, chainConfig = {}) {
+    const chainKey = chainConfig.key || "default";
+    const cacheKey = `${chainKey}:${asset.toLowerCase()}`;
+    const cached = assetMetaCache.get(cacheKey);
+    if (cached) return cached;
+    const meta = await getAssetMetadata(asset, provider, chainConfig);
+    assetMetaCache.set(cacheKey, meta);
+    return meta;
+}
+
+// Enriches ONE candidate (debt + collateral) using a single Multicall3 batch of
+// getUserReserveData across all reserves, instead of one serial RPC per reserve.
+// Returns { debtAsset, debtAmount, debtDecimals, debtSymbol, collateralAsset } or
+// null if the user has no positive debt or no valid collateral. `reserves` is the
+// (cached) reserves list, passed in so a batch of candidates shares one fetch.
+//
+// Debt selection mirrors getPrimaryDebtPosition: prefer the chain's configured
+// debt asset if the user owes it, else the largest debt position. Collateral
+// selection mirrors getPrimaryCollateral: the largest aToken balance with
+// usageAsCollateralEnabled. Both are derived from the SAME batched read.
+async function enrichCandidateBatched(user, provider, chainConfig, reserves) {
+    if (!chainConfig.protocolDataProvider || !Array.isArray(reserves) || reserves.length === 0) {
+      // No data provider (subgraph-only chain) or no reserves — fall back to the
+      // original serial path so behavior is preserved on those configs.
+      const debtPosition = await getPrimaryDebtPosition(user, provider, chainConfig);
+      if (debtPosition.debtAmount.lte(ethers.constants.Zero)) return null;
+      const collateralAsset = await getPrimaryCollateral(user, provider, chainConfig);
+      if (!collateralAsset) return null;
+      return {
+        debtAsset: debtPosition.debtAsset,
+        debtAmount: debtPosition.debtAmount,
+        debtDecimals: debtPosition.debtDecimals,
+        debtSymbol: debtPosition.debtSymbol,
+        collateralAsset,
+      };
+    }
+
+    const dpAddress = chainConfig.protocolDataProvider;
+    const calls = reserves.map((asset) => ({
+      target: dpAddress,
+      allowFailure: true,
+      callData: DATA_PROVIDER_IFACE.encodeFunctionData("getUserReserveData", [asset, user]),
+    }));
+
+    const batchSize = parseInt(process.env.MULTICALL_BATCH_SIZE || "300", 10);
+    const raw = await aggregate3InBatches(provider, calls, batchSize);
+
+    const preferredDebt = (chainConfig.debtAssetAddress || process.env.DEBT_ASSET_ADDRESS || "").toLowerCase();
+    let preferredDebtEntry = null; // { asset, debtAmount }
+    let bestDebtEntry = null; // largest non-preferred debt as fallback
+    let bestCollateral = null; // { asset, balance }
+
+    for (let i = 0; i < reserves.length; i++) {
+      const asset = reserves[i];
+      const entry = raw[i];
+      if (!entry || !entry.success || !entry.returnData || entry.returnData === "0x") continue;
+      let decoded;
+      try {
+        decoded = DATA_PROVIDER_IFACE.decodeFunctionResult("getUserReserveData", entry.returnData);
+      } catch (_) {
+        continue;
+      }
+
+      const debtAmount = decoded.currentStableDebt.add(decoded.currentVariableDebt);
+      if (debtAmount.gt(ethers.constants.Zero)) {
+        if (asset.toLowerCase() === preferredDebt) {
+          preferredDebtEntry = { asset, debtAmount };
+        } else if (!bestDebtEntry || debtAmount.gt(bestDebtEntry.debtAmount)) {
+          bestDebtEntry = { asset, debtAmount };
+        }
+      }
+
+      if (
+        decoded.currentATokenBalance.gt(ethers.constants.Zero) &&
+        decoded.usageAsCollateralEnabled &&
+        (!bestCollateral || decoded.currentATokenBalance.gt(bestCollateral.balance))
+      ) {
+        bestCollateral = { asset, balance: decoded.currentATokenBalance };
+      }
+    }
+
+    const chosenDebt = preferredDebtEntry || bestDebtEntry;
+    if (!chosenDebt) return null; // no positive debt
+    if (!bestCollateral) return null; // no valid collateral
+
+    const meta = await getAssetMetadataCached(chosenDebt.asset, provider, chainConfig);
+    return {
+      debtAsset: chosenDebt.asset,
+      debtAmount: chosenDebt.debtAmount,
+      debtDecimals: meta.decimals,
+      debtSymbol: meta.symbol,
+      collateralAsset: bestCollateral.asset,
+    };
 }
 
 async function getUserReservePositions(userAddress, provider, chainConfig = {}) {
@@ -1245,11 +1531,31 @@ function getPoolAddress(chainConfig = {}) {
 function getSubgraphUrl(chainConfig = {}) {
     return chainConfig.subgraphUrl || process.env.SUBGRAPH_URL || DEFAULT_SUBGRAPH_URL;
 }
+
+// Per-chain USD debt floor for what's worth liquidating, used both as the
+// watchlist/candidate dust filter and (via the bot) the practice-mode gate.
+// Resolution: <CHAIN>_MIN_DEBT_USD env override → global MIN_DEBT_USD → $100.
+// Lets cheap chains (Avalanche/Optimism) work smaller positions without lowering
+// the floor on Base/Arbitrum, where gas makes small liquidations unprofitable.
+function resolveChainMinDebtUsd(chainConfig = {}) {
+    const key = (chainConfig.key || "").toUpperCase();
+    // Try per-chain, then global, then default — each only if it parses to a
+    // valid non-negative number, so a malformed per-chain override falls through
+    // to the global rather than silently snapping to the hardcoded default.
+    const candidates = [key ? process.env[`${key}_MIN_DEBT_USD`] : undefined, process.env.MIN_DEBT_USD, "100"];
+    for (const raw of candidates) {
+      if (raw === undefined || raw === null || raw === "") continue;
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v >= 0) return v;
+    }
+    return 100;
+}
   
   module.exports = {
     getUnhealthyPositions,
     getUserHealthFactor,
     getUserHealthFactorsBatched,
+    sweepHealthFactorsStreaming,
     getDebtAmount,
     getDebtPosition,
     getDebtPositions,
@@ -1258,6 +1564,9 @@ function getSubgraphUrl(chainConfig = {}) {
     getBorrowersFromBorrowEvents,
     getBorrowersFromSubgraph,
     getReservesList,
+    getReservesListCached,
     getPrimaryCollateral,
+    enrichCandidateBatched,
+    resolveChainMinDebtUsd,
     // ...other exports as needed
   };
