@@ -1,0 +1,272 @@
+{
+  "/Users/cobibean/Documents/liquidator(s()/.claude/settings.local.json": {
+    "mtime": 1780414060.873141,
+    "ast_hash": "e7fae6484339d41769942cd8c838345e",
+    "semantic_hash": "e7fae6484339d41769942cd8c838345e"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/.graphify_detect.json": {
+    "mtime": 1780455471.5808787,
+    "ast_hash": "daf7bbc48fe19181ac4e03ba5eaa8f46",
+    "semantic_hash": "daf7bbc48fe19181ac4e03ba5eaa8f46"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/aaveHelpers.js": {
+    "mtime": 1780425639.7930598,
+    "ast_hash": "7e53936ba8065487385ce74529ccf8e4",
+    "semantic_hash": "7e53936ba8065487385ce74529ccf8e4"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/artifacts/contracts/AaveLiquidator.sol/AaveLiquidator.dbg.json": {
+    "mtime": 1780368642.1508453,
+    "ast_hash": "767ab6bee940401f78201dca3a0eb140",
+    "semantic_hash": "767ab6bee940401f78201dca3a0eb140"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/artifacts/contracts/AaveLiquidator.sol/AaveLiquidator.json": {
+    "mtime": 1780368642.1510923,
+    "ast_hash": "701d9b095162db95c02c7e6057edf24d",
+    "semantic_hash": "701d9b095162db95c02c7e6057edf24d"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/artifacts/contracts/AaveLiquidatorSwapRouter02.sol/AaveLiquidatorSwapRouter02.json": {
+    "mtime": 1780423479.9671655,
+    "ast_hash": "3eb606a05f47be26ba5cff12fbe451f6",
+    "semantic_hash": "3eb606a05f47be26ba5cff12fbe451f6"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/artifacts/contracts/INetSwapRouter.sol/INetSwapRouter.dbg.json": {
+    "mtime": 1780368642.1513665,
+    "ast_hash": "767ab6bee940401f78201dca3a0eb140",
+    "semantic_hash": "767ab6bee940401f78201dca3a0eb140"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/artifacts/contracts/INetSwapRouter.sol/INetSwapRouter.json": {
+    "mtime": 1780368642.1515722,
+    "ast_hash": "1ae52c356837338abb205a4a0a95ebfb",
+    "semantic_hash": "1ae52c356837338abb205a4a0a95ebfb"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/bot.js": {
+    "mtime": 1780425839.6403306,
+    "ast_hash": "a11d75a41dc2e80cd17a8b37f756f1bd",
+    "semantic_hash": "a11d75a41dc2e80cd17a8b37f756f1bd"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/checkBorrowEvents.js": {
+    "mtime": 1780373235.0761616,
+    "ast_hash": "19877630d468a729e1b9885e54b79a52",
+    "semantic_hash": "19877630d468a729e1b9885e54b79a52"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/getRealPool.js": {
+    "mtime": 1780373241.3613071,
+    "ast_hash": "d806c5e7bb51a3c45e9c5e6ed87c2484",
+    "semantic_hash": "d806c5e7bb51a3c45e9c5e6ed87c2484"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/package.json": {
+    "mtime": 1780376937.2673993,
+    "ast_hash": "b1fdc1670bb0a9f16c72ed72efd857f0",
+    "semantic_hash": "b1fdc1670bb0a9f16c72ed72efd857f0"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/checkArbDeploy.js": {
+    "mtime": 1780423566.407538,
+    "ast_hash": "0cb634a182dba2eb1c8925ad1cecf6da",
+    "semantic_hash": "0cb634a182dba2eb1c8925ad1cecf6da"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/checkDropletRoom.js": {
+    "mtime": 1780377025.4014695,
+    "ast_hash": "4a6802de907388d8a156d38423147fde",
+    "semantic_hash": "4a6802de907388d8a156d38423147fde"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/checkMissedOverlap.js": {
+    "mtime": 1780414899.6731703,
+    "ast_hash": "fef6ed7b9946c72ebd6306d67d8578f1",
+    "semantic_hash": "fef6ed7b9946c72ebd6306d67d8578f1"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/compileContracts.js": {
+    "mtime": 1780375608.2268953,
+    "ast_hash": "94379b7e826f7b6aaa49946b0f27450b",
+    "semantic_hash": "94379b7e826f7b6aaa49946b0f27450b"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/deployArbitrumHardened.js": {
+    "mtime": 1780436720.0148928,
+    "ast_hash": "a0b00695bca4d1577f8b35e99b9c84d4",
+    "semantic_hash": "a0b00695bca4d1577f8b35e99b9c84d4"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/deployLiquidator.js": {
+    "mtime": 1780375930.9061332,
+    "ast_hash": "ed8f020db5216189480c11d6cd410672",
+    "semantic_hash": "ed8f020db5216189480c11d6cd410672"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/diagnoseScan.js": {
+    "mtime": 1780414098.2489657,
+    "ast_hash": "d8a2771b4178ee4758da4d21f5f23dce",
+    "semantic_hash": "d8a2771b4178ee4758da4d21f5f23dce"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/findDeploymentBlocks.js": {
+    "mtime": 1780419290.3653982,
+    "ast_hash": "6b849aa1bdf6ac4c99c08ee179f5b95c",
+    "semantic_hash": "6b849aa1bdf6ac4c99c08ee179f5b95c"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/liquidationPreflight.js": {
+    "mtime": 1780376363.9950461,
+    "ast_hash": "24664e9989345f64484bcf187a181b53",
+    "semantic_hash": "24664e9989345f64484bcf187a181b53"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/multiChainSmoke.js": {
+    "mtime": 1780377372.329022,
+    "ast_hash": "9605cf141e054d1c1c7f55b85238d56b",
+    "semantic_hash": "9605cf141e054d1c1c7f55b85238d56b"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeBaseCurrency.js": {
+    "mtime": 1780421413.8635435,
+    "ast_hash": "e7d6f709c23f0aca55343a841939c6d3",
+    "semantic_hash": "e7d6f709c23f0aca55343a841939c6d3"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeDeepCoverage.js": {
+    "mtime": 1780418968.1789644,
+    "ast_hash": "52443ead788c38b93a632542c61d6bc2",
+    "semantic_hash": "52443ead788c38b93a632542c61d6bc2"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeDeployedContract.js": {
+    "mtime": 1780423251.353853,
+    "ast_hash": "16639fc85c4608d1c67a2381b920ba26",
+    "semantic_hash": "16639fc85c4608d1c67a2381b920ba26"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeMeaningfulCoverage.js": {
+    "mtime": 1780419607.5043607,
+    "ast_hash": "aa0d3937274c31352f4e659dede775ea",
+    "semantic_hash": "aa0d3937274c31352f4e659dede775ea"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeMissedUsers.js": {
+    "mtime": 1780419451.3066194,
+    "ast_hash": "1e3dec1af2c0f5ded2496cfc0ef72e27",
+    "semantic_hash": "1e3dec1af2c0f5ded2496cfc0ef72e27"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeMulticall.js": {
+    "mtime": 1780418744.4768577,
+    "ast_hash": "18a1c2d07d0d46fffb34adfa56dfdca2",
+    "semantic_hash": "18a1c2d07d0d46fffb34adfa56dfdca2"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeOracle.js": {
+    "mtime": 1780425690.6991894,
+    "ast_hash": "792be3c2498ffb02f8c8a1fe62f024df",
+    "semantic_hash": "792be3c2498ffb02f8c8a1fe62f024df"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/probeRouterWeth.js": {
+    "mtime": 1780423332.1622949,
+    "ast_hash": "884825a1c4229b25bcfc6df7e3a9c1fa",
+    "semantic_hash": "884825a1c4229b25bcfc6df7e3a9c1fa"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/recentLiquidations.js": {
+    "mtime": 1780416398.6027515,
+    "ast_hash": "17cfdeffaa9719627b8f6f23b3685aba",
+    "semantic_hash": "17cfdeffaa9719627b8f6f23b3685aba"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/setMinProfit.js": {
+    "mtime": 1780423612.2764926,
+    "ast_hash": "a3947c7ef0c8f2f7d0d82187b07db3df",
+    "semantic_hash": "a3947c7ef0c8f2f7d0d82187b07db3df"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testBatchedHf.js": {
+    "mtime": 1780418850.26776,
+    "ast_hash": "c0e7c6ca169e6dfd8f5d723782c23f70",
+    "semantic_hash": "c0e7c6ca169e6dfd8f5d723782c23f70"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testDiscovery.js": {
+    "mtime": 1780415611.006113,
+    "ast_hash": "df906d9ddba9029fb4091d5d39bcbf7f",
+    "semantic_hash": "df906d9ddba9029fb4091d5d39bcbf7f"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testMinProfit.js": {
+    "mtime": 1780425856.7297142,
+    "ast_hash": "419c3d5473d3597b3f89d72fc594e96b",
+    "semantic_hash": "419c3d5473d3597b3f89d72fc594e96b"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testResumable.js": {
+    "mtime": 1780421654.4742498,
+    "ast_hash": "b3fbd51db6d79c0d229133781b57d7e0",
+    "semantic_hash": "b3fbd51db6d79c0d229133781b57d7e0"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testResume2.js": {
+    "mtime": 1780421695.841007,
+    "ast_hash": "3778972f8ccc3a560f5c78481ffef2bc",
+    "semantic_hash": "3778972f8ccc3a560f5c78481ffef2bc"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/testStratified.js": {
+    "mtime": 1780418883.1717443,
+    "ast_hash": "43143dc871e827d1e4191b5651168bb7",
+    "semantic_hash": "43143dc871e827d1e4191b5651168bb7"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/scripts/verifyNewContracts.js": {
+    "mtime": 1780423547.1321473,
+    "ast_hash": "f2d73a4bede229a4c5cb71f76732e6e4",
+    "semantic_hash": "f2d73a4bede229a4c5cb71f76732e6e4"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/borrowerStore.js": {
+    "mtime": 1780421605.2308974,
+    "ast_hash": "7b744263704c1f764c87e2152d5642e5",
+    "semantic_hash": "7b744263704c1f764c87e2152d5642e5"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/chains.js": {
+    "mtime": 1780436973.395965,
+    "ast_hash": "3e3a3461d34f1cefd243d1f6a1396269",
+    "semantic_hash": "3e3a3461d34f1cefd243d1f6a1396269"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/config.ts": {
+    "mtime": 1780368642.1527305,
+    "ast_hash": "7215ee9c7d9dc229d2921a40e899ec5f",
+    "semantic_hash": "7215ee9c7d9dc229d2921a40e899ec5f"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/gas.js": {
+    "mtime": 1780370877.4175768,
+    "ast_hash": "c5e60aa1ebef3352075eadc1b0253575",
+    "semantic_hash": "c5e60aa1ebef3352075eadc1b0253575"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/multicall.js": {
+    "mtime": 1780418762.755066,
+    "ast_hash": "342f09f8572a3168857e3164590e536e",
+    "semantic_hash": "342f09f8572a3168857e3164590e536e"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/src/provider.js": {
+    "mtime": 1780373213.9526303,
+    "ast_hash": "3782c8d1e47b6ae4bc44d306b5b41f11",
+    "semantic_hash": "3782c8d1e47b6ae4bc44d306b5b41f11"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/testScript.js": {
+    "mtime": 1780373257.2365928,
+    "ast_hash": "1a9cc88885cf50b2ea770c58fd665172",
+    "semantic_hash": "1a9cc88885cf50b2ea770c58fd665172"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/AGENTS.md": {
+    "mtime": 1780413028.3130293,
+    "ast_hash": "8ae57eb1ff6ff6bbcb6c284e97ad39ee",
+    "semantic_hash": "8ae57eb1ff6ff6bbcb6c284e97ad39ee"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/README.md": {
+    "mtime": 1780377562.9959774,
+    "ast_hash": "32c20ec7b734c32a195eeed8dbca4c3a",
+    "semantic_hash": "32c20ec7b734c32a195eeed8dbca4c3a"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/SECURITY.md": {
+    "mtime": 1780368642.1500185,
+    "ast_hash": "fb7aabe1a2ead77e476093a7818a35d4",
+    "semantic_hash": "fb7aabe1a2ead77e476093a7818a35d4"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/docker-compose.yml": {
+    "mtime": 1780418731.5249767,
+    "ast_hash": "5e70e2b30915923850a95e310f0ac4e0",
+    "semantic_hash": "5e70e2b30915923850a95e310f0ac4e0"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/docs/MIGRATION-HANDOFF.md": {
+    "mtime": 1780444191.4565551,
+    "ast_hash": "bb2fd0965d95959635b4e3861f16d3ca",
+    "semantic_hash": "bb2fd0965d95959635b4e3861f16d3ca"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/docs/event-driven-triggers.md": {
+    "mtime": 1780423942.5254934,
+    "ast_hash": "fa7d0f553e3810613b72a180a7693916",
+    "semantic_hash": "fa7d0f553e3810613b72a180a7693916"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/docs/liquidator-bot-overview.html": {
+    "mtime": 1780444474.2993443,
+    "ast_hash": "5ffd809411f594632c4c4b242bedcab2",
+    "semantic_hash": "5ffd809411f594632c4c4b242bedcab2"
+  },
+  "/Users/cobibean/Documents/liquidator(s()/docs/memory/2026-06-02/liquidator-droplet-runtime-memory-2026-06-02.md": {
+    "mtime": 1780413028.313384,
+    "ast_hash": "868758d349963cd95dab4e0e37d70f49",
+    "semantic_hash": "868758d349963cd95dab4e0e37d70f49"
+  }
+}

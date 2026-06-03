@@ -254,7 +254,7 @@ liveGasCostUSD via Aave oracle (native &amp; debt prices, 8-dp USD)</pre>
 <section id="run">
   <h2 class="sec">07 · Running &amp; operating it</h2>
   <h3>Where it lives</h3>
-  <p>DigitalOcean droplet <code>hermes-fleet-1</code> (nyc3, 2 vCPU / 4 GB), app dir <code>/opt/aave-liquidator-bot</code>, container <code>aave-liquidator</code> via Docker Compose. Borrower store persists in the named volume <code>liquidator-data</code> at <code>/app/data</code>.</p>
+  <p>DigitalOcean droplet <code>liquidator-solo-1</code> (nyc3, 2 vCPU / 4 GB), app dir <code>/opt/aave-liquidator-bot</code>, container <code>aave-liquidator</code> via Docker Compose. Borrower store persists in the named volume <code>liquidator-data</code> at <code>/app/data</code>.</p>
   <h3>Deploy an update</h3>
   <pre><span class="c"># from your machine — preserves the droplet's .env</span>
 rsync -az --delete --exclude .env --exclude node_modules \
@@ -268,7 +268,7 @@ docker logs aave-liquidator | grep "BACKFILL complete"</pre>
   <h3>Check reality (did we cover what's being liquidated?)</h3>
   <pre>docker exec aave-liquidator node scripts/recentLiquidations.js
 docker exec aave-liquidator node scripts/probeMeaningfulCoverage.js base 100</pre>
-  <div class="call bad"><b>Going live</b>The bot only submits when <code>TEST_MODE=false</code>. That can send real transactions and spend real gas. Flip it deliberately, in the droplet <code>.env</code>, only after the profitability checks are validated. <b>It is TEST_MODE today.</b></div>
+  <div class="call bad"><b>Live mode</b>The bot submits when <code>TEST_MODE=false</code>. That can send real transactions and spend real gas. Confirm it deliberately in the droplet <code>.env</code> before every restart. <b>It is live today.</b></div>
 </section>
 
 <section id="config">
