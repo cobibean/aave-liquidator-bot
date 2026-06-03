@@ -146,12 +146,20 @@ pm2 start bot.js --name "aave-liquidator"
 pm2 logs aave-liquidator
 ```
 
-Or run it with Docker Compose:
+Or run it with Docker Compose. Each chain runs in its OWN container
+(`bot-base`, `bot-arbitrum`, `bot-optimism`, `bot-avalanche`, `bot-plasma`) so
+one chain's heavy sweep or OOM can't stall the others; they share the same
+`.env` and the same `liquidator-data` volume (stores are per-chain files).
 
 ```bash
 docker compose up -d --build
-docker compose logs -f aave-liquidator
+docker compose logs -f bot-base          # one chain
+docker compose logs -f bot-base bot-arbitrum bot-optimism bot-avalanche bot-plasma  # all
+docker compose ps                        # see all chain containers + the monitor
 ```
+
+Per-chain heap caps (`--max-old-space-size`) and `mem_limit`s are set in
+`docker-compose.yml` to fit a 4 GB host (Base gets the most; small chains less).
 
 ## Monitoring
 

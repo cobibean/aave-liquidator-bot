@@ -904,7 +904,7 @@ async function getDebtPosition(userAddress, provider, debtAssetAddress, chainCon
     if (chainConfig.protocolDataProvider) {
       const [reserveData, metadata] = await Promise.all([
         getUserReserveData(debtAssetAddress, userAddress, provider, chainConfig),
-        getAssetMetadata(debtAssetAddress, provider, chainConfig),
+        getAssetMetadataCached(debtAssetAddress, provider, chainConfig),
       ]);
       const debtAmount = reserveData.currentStableDebt.add(reserveData.currentVariableDebt);
 
@@ -1031,14 +1031,14 @@ async function getDebtPositions(userAddress, provider, chainConfig = {}) {
       return fallbackDebt.debtAmount.gt(ethers.constants.Zero) ? [fallbackDebt] : [];
     }
 
-    const reserves = await getReservesList(provider, chainConfig);
+    const reserves = await getReservesListCached(provider, chainConfig);
     const debtPositions = [];
 
     for (const asset of reserves) {
       try {
         const [reserveData, metadata] = await Promise.all([
           getUserReserveData(asset, userAddress, provider, chainConfig),
-          getAssetMetadata(asset, provider, chainConfig),
+          getAssetMetadataCached(asset, provider, chainConfig),
         ]);
         const debtAmount = reserveData.currentStableDebt.add(reserveData.currentVariableDebt);
 
@@ -1465,7 +1465,7 @@ async function enrichCandidateBatched(user, provider, chainConfig, reserves) {
 }
 
 async function getUserReservePositions(userAddress, provider, chainConfig = {}) {
-    const reserves = await getReservesList(provider, chainConfig);
+    const reserves = await getReservesListCached(provider, chainConfig);
     const positions = [];
 
     for (const asset of reserves) {
