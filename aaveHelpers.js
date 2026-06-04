@@ -1122,6 +1122,23 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     const nearHf = resolveChainNearHf(chainConfig, watchlistHf);
     const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "20", 10);
     const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "8", 10);
+    // WARM_SWEEP_SLICES (per-chain <CHAIN>_WARM_SWEEP_SLICES): split the warm
+    // active-debt sweep into this many rotating slices, one slice per warm cycle,
+    // so a large index (Base's ~60k) doesn't stall a single cycle for 90s–7min and
+    // starve the every-cycle watchlist/near tiers. 1 = legacy single-cycle warm
+    // sweep. Each slice still unions its debt-holders into the index (warm never
+    // prunes — only COLD does), so N slices cover the whole index across N cycles,
+    // equivalent to one big warm sweep, just spread out. The hot watchlist∪near∪new
+    // tiers are added to EVERY warm slice, so detection of at-risk wallets is never
+    // delayed by slicing.
+    const chainEnvKey = (chainConfig.key || "").toUpperCase();
+    const warmSweepSlices = Math.max(
+      1,
+      parseInt(
+        (chainEnvKey && process.env[`${chainEnvKey}_WARM_SWEEP_SLICES`]) || process.env.WARM_SWEEP_SLICES || "1",
+        10
+      ) || 1
+    );
     const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
     const chainKey = chainConfig.key || "default";
 
@@ -1159,8 +1176,29 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     if (doColdSweep) {
       sweepSet = borrowers;
     } else if (doWarmSweep) {
-      // Active-debt index ∪ this cycle's new borrowers (latter not yet indexed).
-      const warmSet = new Set(active);
+      // WARM = re-scan the active-debt index to catch wallets that crossed toward
+      // liquidation since the last full sweep. On a large index (Base ~60k) doing
+      // it all in one cycle stalls 90s–7min and starves the every-cycle tiers, so
+      // optionally take one rotating slice of the index per warm cycle. Across
+      // `warmSweepSlices` warm cycles every wallet is covered; since warm only
+      // UNIONS into the index (never prunes — only COLD prunes), a sliced pass is
+      // equivalent to one big warm sweep, just spread out.
+      let warmSlice = active;
+      if (warmSweepSlices > 1 && active.size > 0) {
+        // Deterministic, stable rotation: sort the index and walk contiguous slices
+        // indexed by warmSweepsSinceCold, so successive warm cycles cover disjoint
+        // parts and wrap cleanly. (Sorting ~60k strings is sub-ms vs the RPC sweep.)
+        const ordered = Array.from(active).sort();
+        const sliceIdx = warmSweepsSinceCold % warmSweepSlices;
+        const per = Math.ceil(ordered.length / warmSweepSlices);
+        warmSlice = ordered.slice(sliceIdx * per, sliceIdx * per + per);
+      }
+      // Always union the hot every-cycle tiers (watchlist ∪ near ∪ freshly-
+      // discovered) so slicing never delays detection of an at-risk wallet, and so
+      // nextWatch/nextNear stay authoritative for the wallets they must own.
+      const warmSet = new Set(warmSlice);
+      for (const w of watch) warmSet.add(w);
+      for (const n of near) warmSet.add(n);
       for (const b of newThisScan) warmSet.add(b);
       sweepSet = Array.from(warmSet);
     } else {

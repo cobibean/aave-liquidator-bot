@@ -37,6 +37,9 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 489_197, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0x33E0b3fc976DC9C516926BA48CfC0A9E10a2aAA5",
     wrappedNative: "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+    // Chainlink XPL/USD proxy (Aave oracle source for native collateral) — PRICE_TRIGGER feed.
+    // Plasma has no free WS; PRICE_TRIGGER falls back to polling this feed on the block loop.
+    collateralPriceFeed: "0xF932477C37715aE6657Ab884414Bd9876FE3f750",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     swapRouter: "0x807F4E281B7A3B324825C64ca53c69F0b418dE40",
     swapIntermediates: ["0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"],
@@ -62,6 +65,10 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 426_768_359, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7",
     wrappedNative: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    // Chainlink ETH/USD proxy (Aave oracle source for WETH collateral). The
+    // PRICE_TRIGGER subscribes to AnswerUpdated on its underlying aggregator()
+    // (resolved at runtime) to react to the price move that drives HF<1.
+    collateralPriceFeed: "0xbD41b1548a5A06544cBcf87c0c54864312842C00",
     // Uniswap V3 SwapRouter02 (factory 0x1F98431c8aD98523631AE4a59f267346ea31F984).
     // Was a SushiSwap V2 router (0x1b02dA8C…) — the V3-only contract's swap reverted.
     // 100% real-collateral V3 coverage verified (scripts/probeCollateralVenues.js).
@@ -90,6 +97,8 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 2_357_134, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156",
     wrappedNative: "0x4200000000000000000000000000000000000006",
+    // Chainlink ETH/USD proxy (Aave oracle source for WETH collateral) — PRICE_TRIGGER feed.
+    collateralPriceFeed: "0x9dA00D23465282005DB222a441a663eE7B9dfCc8",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     // Uniswap V3 SwapRouter02 (factory 0x33128a8fC17869897dcE68Ed026d694621f6FDfD).
     // Was a V2 router (0x4752ba5d…) — the V3-only contract's swap reverted.
@@ -118,6 +127,8 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 4_365_693, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xD81eb3728a631871a7eBBaD631b5f424909f0c77",
     wrappedNative: "0x4200000000000000000000000000000000000006",
+    // Chainlink ETH/USD proxy (Aave oracle source for WETH collateral) — PRICE_TRIGGER feed.
+    collateralPriceFeed: "0x13e3Ee699D1909E989722E753853AE30b17e08c5",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     // Uniswap V3 SwapRouter02 (factory 0x1F98431c8aD98523631AE4a59f267346ea31F984).
     // Was a V2 router (0x4A7b5Da6…) — the V3-only contract's swap reverted.
@@ -182,6 +193,8 @@ const CHAIN_CONFIGS = {
     deploymentBlock: 11_970_506, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C",
     wrappedNative: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+    // Chainlink AVAX/USD proxy (Aave oracle source for WAVAX collateral) — PRICE_TRIGGER feed.
+    collateralPriceFeed: "0x0A77230d17318075983913bC2145DB16C7366156",
     hardenedLiquidator: true, // deployed contract supports triggerLiquidationWithMinProfit
     // Uniswap V3 SwapRouter02 (factory 0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD).
     // Was a SushiSwap V2 router (0x1b02da8c…) — the V3-only contract's swap reverted.

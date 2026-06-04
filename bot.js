@@ -129,25 +129,72 @@ async function runChainBot(chainConfig) {
   // cheap enough to run frequently. The first cycle pays a one-time backfill.
   const cycleMs = parseInt(process.env.SCAN_INTERVAL_MS || "15000", 10);
 
-  // Optional per-block watchlist trigger (Batch 1.1). Off by default. When on,
-  // re-checks ONLY the near-threshold watchlist every block (cheap), so a
-  // position crossing HF<1 is acted on within ~1 block instead of up to
-  // SCAN_INTERVAL_MS later. The slow poll below keeps maintaining the watchlist.
-  if (process.env.BLOCK_TRIGGER === "true") {
-    const blockProvider = createBlockProvider(chainConfig) || provider;
-    const usingWs = blockProvider !== provider;
+  // Event-driven triggers (Batch 1.1 + Phase 4). Both re-check ONLY the
+  // near-threshold watchlist (cheap), under the shared `lock`, so a position
+  // crossing HF<1 is acted on near-instantly instead of up to SCAN_INTERVAL_MS
+  // later. The slow poll below keeps maintaining the watchlist. A single WS
+  // provider (if a <CHAIN>_WS_URL is configured) is shared by both triggers so
+  // we open at most one socket per chain.
+  const wantBlockTrigger = process.env.BLOCK_TRIGGER === "true";
+  const wantPriceTrigger = process.env.PRICE_TRIGGER === "true" && !!chainConfig.collateralPriceFeed;
+  const eventProvider =
+    wantBlockTrigger || wantPriceTrigger ? createBlockProvider(chainConfig) || provider : null;
+  const usingWs = eventProvider && eventProvider !== provider;
+
+  // Shared watchlist-check runner: whichever trigger fires first grabs the lock;
+  // the other skips (the watchlist is the same, so a concurrent re-check is pure
+  // waste and risks a double-submit / nonce stampede).
+  const triggerWatchlistCheck = async (label, hint) => {
+    if (lock.inFlight) return; // a poll or prior trigger is still running
+    lock.inFlight = true;
+    try {
+      await runWatchlistCheck(ctx, hint);
+    } catch (error) {
+      console.error(`❌ ${chainConfig.name}: ${label} error:`, error.message);
+    } finally {
+      lock.inFlight = false;
+    }
+  };
+
+  // 1.1 — per-block watchlist re-check.
+  if (wantBlockTrigger) {
     console.log(`🔔 ${chainConfig.name}: per-block watchlist trigger ON (${usingWs ? "WebSocket push" : "HTTP polling"}).`);
-    blockProvider.on("block", async (blockNumber) => {
-      if (lock.inFlight) return; // a poll or prior block check is still running
-      lock.inFlight = true;
+    eventProvider.on("block", (blockNumber) => triggerWatchlistCheck(`block-trigger (block ${blockNumber})`, blockNumber));
+  }
+
+  // Phase 4 — Chainlink price-update trigger. The Aave oracle source for the
+  // volatile collateral (ETH/AVAX/XPL /USD) is a Chainlink proxy; its underlying
+  // aggregator emits AnswerUpdated when the price moves — which is the actual
+  // cause of an HF dropping below 1. Reacting to that event (rather than only the
+  // next block tick) shaves latency and tells us a price just moved, so we
+  // re-check the watchlist immediately. WS push where available (free on Alchemy);
+  // Plasma (no WS) leans on its per-block trigger instead — we skip the price
+  // subscription there since a WS-less aggregator poll would just duplicate it.
+  if (wantPriceTrigger) {
+    if (!usingWs) {
+      console.log(`📈 ${chainConfig.name}: PRICE_TRIGGER requested but no WS endpoint — relying on per-block trigger instead (no separate price subscription).`);
+    } else {
       try {
-        await runWatchlistCheck(ctx, blockNumber);
+        // The proxy address is stable; resolve the current underlying aggregator
+        // (the contract that actually emits AnswerUpdated) at startup.
+        const proxy = new ethers.Contract(
+          chainConfig.collateralPriceFeed,
+          ["function aggregator() view returns (address)", "function description() view returns (string)"],
+          eventProvider
+        );
+        const aggregatorAddr = await proxy.aggregator();
+        let desc = "";
+        try { desc = await proxy.description(); } catch (_) {}
+        const ANSWER_UPDATED = "event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 updatedAt)";
+        const aggregator = new ethers.Contract(aggregatorAddr, [ANSWER_UPDATED], eventProvider);
+        console.log(`📈 ${chainConfig.name}: price-update trigger ON (Chainlink ${desc || "feed"} ${aggregatorAddr}, WebSocket push).`);
+        aggregator.on("AnswerUpdated", (current, roundId) =>
+          triggerWatchlistCheck(`price-trigger (round ${roundId?.toString?.() || "?"})`, undefined)
+        );
       } catch (error) {
-        console.error(`❌ ${chainConfig.name}: block-trigger error (block ${blockNumber}):`, error.message);
-      } finally {
-        lock.inFlight = false;
+        console.error(`❌ ${chainConfig.name}: failed to set up price trigger:`, error.message);
       }
-    });
+    }
   }
 
   while (true) {
@@ -189,6 +236,9 @@ async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract
   const { watch } = loadWatchlist(chainKey);
   if (!watch || watch.size === 0) return;
 
+  // Source tag for logs: a block number (per-block trigger) or "price-update"
+  // (Chainlink AnswerUpdated trigger, which passes no block number).
+  const at = blockNumber != null ? `block ${blockNumber}` : "price-update";
   const threshold = parseFloat(process.env.LIQUIDATION_THRESHOLD || "1.0");
   const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
 
@@ -200,12 +250,12 @@ async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract
 
   if (liq.length === 0) {
     if (process.env.VERBOSE_HEALTH_LOGS === "true") {
-      console.log(`   ⛓️ ${chainConfig.name}: block ${blockNumber} watchlist ${watch.size} clean (${Date.now() - t0}ms).`);
+      console.log(`   ⛓️ ${chainConfig.name}: ${at} watchlist ${watch.size} clean (${Date.now() - t0}ms).`);
     }
     return;
   }
 
-  console.log(`🔔 ${chainConfig.name}: block ${blockNumber} — ${liq.length} watchlist position(s) below ${threshold} (${Date.now() - t0}ms).`);
+  console.log(`🔔 ${chainConfig.name}: ${at} — ${liq.length} watchlist position(s) below ${threshold} (${Date.now() - t0}ms).`);
 
   // Enrich the urgent ones concurrently (each a single batched read), then
   // attempt in lowest-HF-first order. attemptLiquidation honors TEST_MODE.
