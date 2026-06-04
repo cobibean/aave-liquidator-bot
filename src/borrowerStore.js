@@ -17,6 +17,10 @@ function watchlistPath(chainKey) {
   return path.join(DATA_DIR, `watchlist-${chainKey}.json`);
 }
 
+function nearPath(chainKey) {
+  return path.join(DATA_DIR, `near-${chainKey}.json`);
+}
+
 function activeDebtPath(chainKey) {
   return path.join(DATA_DIR, `active-debt-${chainKey}.json`);
 }
@@ -107,6 +111,41 @@ function saveWatchlist(chainKey, watch, cyclesSinceFullSweep) {
   fs.renameSync(tmpPath, finalPath);
 }
 
+// "near" set = a WIDER mid-tier than the watchlist: wallets carrying non-dust
+// debt AND HF below NEAR_HF (e.g. 1.5, vs the watchlist's 1.25). It's swept EVERY
+// cycle along with the watchlist, so a wallet that drops from the 1.25–1.5 band
+// straight into liquidation BETWEEN the slow full/warm sweeps is still caught the
+// cycle it crosses — closing the "watchlist-gap" loss (wallets in our store but
+// not in the hot set when they crossed). It stays small (~thousands, not the
+// ~60k active-debt index) precisely because it's debt-floored: dust is excluded.
+// Rebuilt by the COLD/WARM sweeps (same stream as the watchlist).
+function loadNear(chainKey) {
+  try {
+    const raw = fs.readFileSync(nearPath(chainKey), "utf-8");
+    const parsed = JSON.parse(raw);
+    return { near: new Set((parsed.near || []).map((a) => a.toLowerCase())) };
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`⚠️ Failed to read near set for ${chainKey}: ${error.message}`);
+    }
+    return { near: new Set() };
+  }
+}
+
+function saveNear(chainKey, near) {
+  ensureDir();
+  const payload = {
+    chainKey,
+    updatedAt: new Date().toISOString(),
+    count: near.size,
+    near: Array.from(near),
+  };
+  const finalPath = nearPath(chainKey);
+  const tmpPath = `${finalPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(payload));
+  fs.renameSync(tmpPath, finalPath);
+}
+
 // Active-debt index = the subset of known borrowers observed carrying debt
 // (totalDebtBase > 0) in the last cold sweep, plus newly-discovered borrowers.
 // The expensive "full" health-factor sweep iterates THIS set instead of every
@@ -153,6 +192,8 @@ module.exports = {
   saveBorrowerSet,
   loadWatchlist,
   saveWatchlist,
+  loadNear,
+  saveNear,
   loadActiveDebt,
   saveActiveDebt,
 };

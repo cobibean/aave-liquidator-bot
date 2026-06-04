@@ -1,6 +1,6 @@
 const { ethers } = require('ethers');
 const fetch = require("node-fetch");
-const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist, loadActiveDebt, saveActiveDebt } = require("./src/borrowerStore");
+const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist, loadNear, saveNear, loadActiveDebt, saveActiveDebt } = require("./src/borrowerStore");
 const { aggregate3InBatches, aggregate3Streaming } = require("./src/multicall");
 const metrics = require("./src/metrics");
 
@@ -1115,6 +1115,11 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
 
     const threshold = parseFloat(process.env.LIQUIDATION_THRESHOLD || "1.0");
     const watchlistHf = parseFloat(process.env.WATCHLIST_HF || "1.25");
+    // NEAR_HF (≥ watchlistHf) defines a wider mid-tier swept EVERY cycle: non-dust
+    // wallets in the 1.25–1.5 band that would otherwise only be re-checked on the
+    // slow full/warm sweep, and so could cross to liquidation unseen between them.
+    // Per-chain overridable (<CHAIN>_NEAR_HF). Set ≤ watchlistHf to disable the tier.
+    const nearHf = resolveChainNearHf(chainConfig, watchlistHf);
     const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "20", 10);
     const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "8", 10);
     const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
@@ -1137,6 +1142,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //     the active-debt index to catch wallets that took on debt without a
     //     Borrow event we'd see incrementally.
     const { watch, cyclesSinceFullSweep } = loadWatchlist(chainKey);
+    const { near } = loadNear(chainKey);
     const { active, warmSweepsSinceCold } = loadActiveDebt(chainKey);
 
     // On a watchlist/warm cycle, also include borrowers discovered THIS cycle by
@@ -1158,9 +1164,14 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
       for (const b of newThisScan) warmSet.add(b);
       sweepSet = Array.from(warmSet);
     } else {
+      // Every-cycle (watchlist) sweep: the hot watchlist UNION the wider non-dust
+      // "near" mid-tier UNION freshly-discovered borrowers. Including `near` is the
+      // fix for the watchlist-gap: a non-dust wallet in the 1.25–1.5 band is now
+      // re-checked every cycle, so if it drops below 1.0 between full sweeps we see
+      // it the cycle it crosses instead of waiting up to FULL_SWEEP_EVERY_N cycles.
       sweepSet = borrowers.filter((b) => {
         const key = b.toLowerCase();
-        return watch.has(key) || newThisScan.has(key);
+        return watch.has(key) || near.has(key) || newThisScan.has(key);
       });
     }
     if (!doColdSweep && newThisScan.size > 0) {
@@ -1192,6 +1203,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //                enrich + attempt, sorted lowest-HF-first (most urgent / most
     //                contested) below.
     const nextWatch = new Set();
+    const nextNear = new Set(); // wider non-dust mid-tier (HF < nearHf), swept every cycle
     const candidates = [];
     let belowThreshold = 0;
     // Active-debt wallets observed THIS sweep (totalDebtUsd > 0). On a cold sweep
@@ -1220,8 +1232,12 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
         if (totalDebtUsd > 0) {
           nextActive.add(user.toLowerCase());
         }
-        if (healthFactor < watchlistHf && totalDebtUsd >= minDebtUsd) {
-          nextWatch.add(user.toLowerCase());
+        if (totalDebtUsd >= minDebtUsd) {
+          if (healthFactor < watchlistHf) nextWatch.add(user.toLowerCase());
+          // The near tier is the wider band (watchlistHf ≤ HF < nearHf, plus it
+          // also includes everything in the watchlist band). Anything non-dust
+          // under nearHf is worth re-checking every cycle.
+          if (healthFactor < nearHf) nextNear.add(user.toLowerCase());
         }
         if (healthFactor < threshold) {
           belowThreshold++;
@@ -1237,7 +1253,8 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
               if (sweptSoFar < sweepSet.length && batchNum - lastCheckpointBatch >= checkpointEveryBatches) {
                 lastCheckpointBatch = batchNum;
                 saveWatchlist(chainKey, nextWatch, fullSweepEveryN);
-                logVerbose(`   …${chainConfig.name}: ${sweepType} checkpoint ${sweptSoFar}/${sweepSet.length} (watch ${nextWatch.size}, active ${nextActive.size}).`);
+                saveNear(chainKey, nextNear);
+                logVerbose(`   …${chainConfig.name}: ${sweepType} checkpoint ${sweptSoFar}/${sweepSet.length} (watch ${nextWatch.size}, near ${nextNear.size}, active ${nextActive.size}).`);
               }
             }
           : undefined,
@@ -1252,6 +1269,15 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
       }
     }
     saveWatchlist(chainKey, nextWatch, needFullSweep ? 0 : cyclesSinceFullSweep + 1);
+
+    // Persist the near mid-tier. On every cycle type, `near` members are part of
+    // sweepSet (watchlist cycle) or a superset (warm/cold), so nextNear is
+    // authoritative — recovered wallets correctly drop out, still-near ones stay.
+    // Only write when it changed, to avoid rewriting a multi-thousand-entry file
+    // every 15s when nothing moved.
+    if (!setsEqual(nextNear, near)) {
+      saveNear(chainKey, nextNear);
+    }
 
     // Maintain the active-debt index. Only the COLD sweep — which reads every
     // borrower — can authoritatively DROP a wallet (it's the only sweep that can
@@ -1285,11 +1311,11 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     // bot is also racing for.
     candidates.sort((a, b) => a.healthFactor - b.healthFactor);
 
-    console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}.`);
+    console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}, near ${nextNear.size}.`);
     metrics.emit("sweep", {
       chain: chainConfig.key, type: sweepType, swept: sweepSet.length,
       sweepMs: Date.now() - t0, below: belowThreshold, candidates: candidates.length,
-      watch: nextWatch.size,
+      watch: nextWatch.size, near: nextNear.size,
     });
 
     // Phase 2: enrich only the unhealthy, non-dust candidates (debt + collateral
@@ -1556,7 +1582,28 @@ function resolveChainMinDebtUsd(chainConfig = {}) {
     }
     return 100;
 }
-  
+
+// Per-chain near-tier HF ceiling: <CHAIN>_NEAR_HF → NEAR_HF → default 1.5.
+// Floored at `watchlistHf` so the near tier is never narrower than the watchlist
+// (≤ watchlistHf effectively disables the extra mid-tier — watch already covers it).
+function resolveChainNearHf(chainConfig = {}, watchlistHf = 1.25) {
+    const key = (chainConfig.key || "").toUpperCase();
+    const candidates = [key ? process.env[`${key}_NEAR_HF`] : undefined, process.env.NEAR_HF, "1.5"];
+    for (const raw of candidates) {
+      if (raw === undefined || raw === null || raw === "") continue;
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v > 0) return Math.max(v, watchlistHf);
+    }
+    return Math.max(1.5, watchlistHf);
+}
+
+// Cheap Set equality (used to skip rewriting the near file when unchanged).
+function setsEqual(a, b) {
+    if (a.size !== b.size) return false;
+    for (const x of a) if (!b.has(x)) return false;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Off-chain V3 swap-path resolver (task 3.3)
 //
