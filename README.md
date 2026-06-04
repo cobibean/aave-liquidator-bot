@@ -196,6 +196,29 @@ The bot outputs detailed logs showing:
 - Execution of liquidations
 - Profits from successful liquidations
 
+### Latency metrics (`📊 METRIC` lines)
+
+The bot emits structured, greppable `key=value` metric lines so you can measure
+where liquidations are won/lost (Detect → Decide → Deliver) without a metrics
+server. Two record types:
+- `ev=sweep` — per HF sweep: `type`, `swept`, `sweepMs`, `candidates`, `watch`.
+- `ev=attempt` — per liquidation attempt: `outcome` (precheck_fail / testmode_ok /
+  sent / mined / reverted / send_error / …), `decideMs`, `deliverMs`,
+  `detectBlock`, `minedBlock`, `blockLag`, `prioGwei`.
+
+```bash
+docker logs bot-base 2>&1 | grep '📊 METRIC ev=attempt'   # the race timeline
+docker logs bot-base 2>&1 | grep '📊 METRIC ev=sweep'     # sweep cost/cadence
+```
+
+And a read-only on-demand analysis that classifies sizeable liquidations we
+*didn't* win by cause (DETECT vs WATCHLIST-gap vs DECIDE/DELIVER) — the data that
+should gate any further speed work:
+
+```bash
+docker exec bot-base node scripts/lossAttribution.js base   # per chain
+```
+
 ### Private monitor dashboard
 
 This repo includes a small Express dashboard in `monitor/` for a human-readable

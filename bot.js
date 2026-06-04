@@ -16,6 +16,7 @@ const { getTransactionOverrides } = require("./src/gas");
 const { createProvider, createBlockProvider } = require("./src/provider");
 const { loadWatchlist } = require("./src/borrowerStore");
 const { NonceManager, maxInFlight } = require("./src/nonceManager");
+const metrics = require("./src/metrics");
 
 const requiredEnv = ["PRIVATE_KEY"];
 const missingEnv = requiredEnv.filter((name) => !process.env[name]);
@@ -347,6 +348,13 @@ async function attemptLiquidation({
     return;
   }
 
+  // METRICS: start the "decide" stopwatch (enrich is already done by the caller;
+  // this times sim + floor + send-prep up to broadcast) and record the block we're
+  // acting at, so block-lag (detect→send) is visible per attempt.
+  const decideT0 = metrics.now();
+  let detectBlock = null;
+  try { detectBlock = await provider.getBlockNumber(); } catch (_) {}
+
   // Fetch the live fee data ONCE for the whole submit path (gas was previously
   // fetched up to three times). getFeeData gives us both the legacy gasPrice (for
   // the cost math in computeMinProfitUnits) AND the EIP-1559 fields (base + tip)
@@ -395,6 +403,11 @@ async function attemptLiquidation({
   });
   if (!profitCheck.ok) {
     console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${profitCheck.reason}).`);
+    metrics.emit("attempt", {
+      chain: chainConfig.key, user, hf: latestHealthFactor,
+      outcome: "precheck_fail", reason: profitCheck.reason,
+      decideMs: metrics.since(decideT0), detectBlock,
+    });
     return;
   }
   console.log(
@@ -417,6 +430,13 @@ async function attemptLiquidation({
       debtToCover: ethers.utils.formatUnits(debtToCover, debtDecimals) + " " + debtSymbol,
       minProfitFloor: previewFloor ? ethers.utils.formatUnits(previewFloor, debtDecimals) + " " + debtSymbol : "n/a",
       hardenedContract: !!chainConfig.hardenedLiquidator,
+    });
+    // Records that the WHOLE pipeline (detect→decide→callStatic) would have
+    // succeeded — the key signal in TEST_MODE that we'd have fired on a real target.
+    metrics.emit("attempt", {
+      chain: chainConfig.key, user, hf: latestHealthFactor,
+      outcome: "testmode_ok", decideMs: metrics.since(decideT0), detectBlock,
+      estGasNative: profitCheck.estGasCostNative, pathAware: !!chainConfig.pathAware,
     });
     return;
   }
@@ -489,6 +509,10 @@ async function attemptLiquidation({
       if (!slotReleased && nonceManager) { nonceManager.release(); slotReleased = true; }
     };
 
+    // METRICS: decide phase ends at broadcast; deliver phase = broadcast→receipt.
+    const decideMs = metrics.since(decideT0);
+    const deliverT0 = metrics.now();
+
     let tx;
     try {
       tx = await broadcast(); // resolves once the tx is broadcast (hash assigned)
@@ -498,10 +522,20 @@ async function attemptLiquidation({
       // handler for logging.
       releaseSlot();
       if (nonceManager) await nonceManager.resync();
+      metrics.emit("attempt", {
+        chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "send_error",
+        reason: sendErr.message, decideMs, detectBlock,
+      });
       throw sendErr;
     }
 
     console.log(`✅ TX sent: ${tx.hash}${overrides.nonce !== undefined ? ` (nonce ${overrides.nonce})` : ""}`);
+    metrics.emit("attempt", {
+      chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "sent",
+      tx: tx.hash, nonce: overrides.nonce, decideMs, detectBlock,
+      pathAware: !!chainConfig.pathAware,
+      prioGwei: overrides.maxPriorityFeePerGas ? ethers.utils.formatUnits(overrides.maxPriorityFeePerGas, "gwei") : undefined,
+    });
 
     // Confirmation. Default: block on the receipt (the proven path). With
     // ASYNC_SEND=true: don't block — confirm out-of-band so the caller can move
@@ -510,14 +544,31 @@ async function attemptLiquidation({
     const confirm = tx
       .wait()
       .then((receipt) => {
-        if (receipt.status === 1) console.log(`🎉 Successful liquidation: ${tx.hash}`);
-        else console.warn(`⚠️ Liquidation TX failed on-chain: ${tx.hash}`);
+        const deliverMs = metrics.since(deliverT0);
+        if (receipt.status === 1) {
+          console.log(`🎉 Successful liquidation: ${tx.hash}`);
+          metrics.emit("attempt", {
+            chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "mined",
+            tx: tx.hash, deliverMs, detectBlock, minedBlock: receipt.blockNumber,
+            blockLag: detectBlock != null ? receipt.blockNumber - detectBlock : undefined,
+            gasUsed: receipt.gasUsed && receipt.gasUsed.toString(),
+          });
+        } else {
+          console.warn(`⚠️ Liquidation TX failed on-chain: ${tx.hash}`);
+          metrics.emit("attempt", {
+            chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "reverted",
+            tx: tx.hash, deliverMs, detectBlock, minedBlock: receipt.blockNumber,
+          });
+        }
       })
       .catch(async (waitErr) => {
+        const deliverMs = metrics.since(deliverT0);
         if (waitErr.code === "TRANSACTION_REPLACED") {
           console.warn(`⚠️ Transaction was replaced: ${waitErr.replacement && waitErr.replacement.hash}`);
+          metrics.emit("attempt", { chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "replaced", tx: tx.hash, deliverMs, detectBlock });
         } else {
           console.error(`❌ Liquidation confirm failed (${tx.hash}):`, waitErr.message);
+          metrics.emit("attempt", { chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "confirm_error", tx: tx.hash, reason: waitErr.message, deliverMs, detectBlock });
         }
         if (nonceManager) await nonceManager.resync();
       })

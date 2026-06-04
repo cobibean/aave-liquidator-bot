@@ -2,6 +2,7 @@ const { ethers } = require('ethers');
 const fetch = require("node-fetch");
 const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist, loadActiveDebt, saveActiveDebt } = require("./src/borrowerStore");
 const { aggregate3InBatches, aggregate3Streaming } = require("./src/multicall");
+const metrics = require("./src/metrics");
 
 // Interface used to encode/decode getUserAccountData calls for Multicall3.
 const POOL_IFACE = new ethers.utils.Interface([
@@ -1285,6 +1286,11 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     candidates.sort((a, b) => a.healthFactor - b.healthFactor);
 
     console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}.`);
+    metrics.emit("sweep", {
+      chain: chainConfig.key, type: sweepType, swept: sweepSet.length,
+      sweepMs: Date.now() - t0, below: belowThreshold, candidates: candidates.length,
+      watch: nextWatch.size,
+    });
 
     // Phase 2: enrich only the unhealthy, non-dust candidates (debt + collateral
     // lookups are heavier, so we do them on the short list, in priority order).
