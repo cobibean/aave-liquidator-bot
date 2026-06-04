@@ -49,6 +49,11 @@ services:
       CHAINS: "arbitrum"
       TEST_MODE: "${TEST_MODE:-true}"
       VERBOSE_HEALTH_LOGS: "${VERBOSE_HEALTH_LOGS:-false}"
+      # Per-block watchlist trigger (1.1) — ENABLED ON ARBITRUM ONLY (it's the one
+      # chain with a private RPC, ARBITRUM_RPC_URL). No WS URL set, so this uses
+      # HTTP block-polling on the private endpoint (lower throttle risk than the
+      # public RPCs the other chains use — hence not enabled fleet-wide yet).
+      BLOCK_TRIGGER: "true"
     command: ["node", "--max-old-space-size=512", "bot.js"]
     mem_limit: 768m
 
