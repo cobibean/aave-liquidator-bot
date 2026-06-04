@@ -1120,8 +1120,16 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     // slow full/warm sweep, and so could cross to liquidation unseen between them.
     // Per-chain overridable (<CHAIN>_NEAR_HF). Set ≤ watchlistHf to disable the tier.
     const nearHf = resolveChainNearHf(chainConfig, watchlistHf);
-    const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "20", 10);
-    const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "8", 10);
+    const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "8", 10);
+    const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "4", 10);
+    // Time-based COLD floor (minutes). COLD is the ONLY sweep that promotes a
+    // newly-borrowing whale (in the known set but no debt at last cold) into the
+    // active-debt/warm tier the fast triggers actually watch. Counter-based
+    // cadence alone let COLD go ~a full day between runs once warm slicing slowed
+    // how fast warmSweepsSinceCold accrues — so freshly-risky whales were never
+    // re-checked and we never fired. This guarantees COLD runs at least every
+    // COLD_MAX_AGE_MIN regardless of the counters. 0 disables the time floor.
+    const coldMaxAgeMin = parseInt(process.env.COLD_MAX_AGE_MIN || "30", 10);
     // WARM_SWEEP_SLICES (per-chain <CHAIN>_WARM_SWEEP_SLICES): split the warm
     // active-debt sweep into this many rotating slices, one slice per warm cycle,
     // so a large index (Base's ~60k) doesn't stall a single cycle for 90s–7min and
@@ -1160,15 +1168,23 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //     Borrow event we'd see incrementally.
     const { watch, cyclesSinceFullSweep } = loadWatchlist(chainKey);
     const { near } = loadNear(chainKey);
-    const { active, warmSweepsSinceCold } = loadActiveDebt(chainKey);
+    const { active, warmSweepsSinceCold, lastColdAt } = loadActiveDebt(chainKey);
 
     // On a watchlist/warm cycle, also include borrowers discovered THIS cycle by
     // the incremental Borrow scan — a freshly-opened risky position should be
     // health-checked now, not delayed up to FULL_SWEEP_EVERY_N cycles.
     const newThisScan = borrowers.newThisScan instanceof Set ? borrowers.newThisScan : new Set();
 
-    const needFullSweep = watch.size === 0 || cyclesSinceFullSweep >= fullSweepEveryN;
-    const doColdSweep = needFullSweep && (active.size === 0 || warmSweepsSinceCold >= coldSweepEveryN);
+    // COLD is also forced when the active-debt index is older than COLD_MAX_AGE_MIN,
+    // so a stale index (and the whales that borrowed since) can't linger unseen
+    // between counter-driven cold sweeps. A never-run index (lastColdAt null) and a
+    // failed timestamp parse both read as stale → due now.
+    const coldAgeMs = lastColdAt ? Date.now() - Date.parse(lastColdAt) : Infinity;
+    const coldStale = coldMaxAgeMin > 0 && !(coldAgeMs >= 0 && coldAgeMs < coldMaxAgeMin * 60_000);
+    const needFullSweep = watch.size === 0 || cyclesSinceFullSweep >= fullSweepEveryN || coldStale;
+    const doColdSweep =
+      (needFullSweep && (active.size === 0 || warmSweepsSinceCold >= coldSweepEveryN)) ||
+      (coldStale && active.size > 0);
     const doWarmSweep = needFullSweep && !doColdSweep;
     const sweepType = doColdSweep ? "COLD" : doWarmSweep ? "WARM" : "watchlist";
 
@@ -1271,11 +1287,19 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
           nextActive.add(user.toLowerCase());
         }
         if (totalDebtUsd >= minDebtUsd) {
-          if (healthFactor < watchlistHf) nextWatch.add(user.toLowerCase());
+          const key = user.toLowerCase();
+          if (healthFactor < watchlistHf) nextWatch.add(key);
           // The near tier is the wider band (watchlistHf ≤ HF < nearHf, plus it
           // also includes everything in the watchlist band). Anything non-dust
           // under nearHf is worth re-checking every cycle.
-          if (healthFactor < nearHf) nextNear.add(user.toLowerCase());
+          if (healthFactor < nearHf) nextNear.add(key);
+          // Fix 2: a freshly-discovered borrower with real debt enters the
+          // every-cycle near tier regardless of HF, so a wallet that opens
+          // healthy (e.g. HF 1.4) is still re-checked every cycle for its first
+          // window instead of dropping to COLD-only and going unseen when a price
+          // move pushes it under 1.0. It ages out of `near` naturally once it
+          // recovers above nearHf on a later sweep (nextNear is authoritative).
+          if (newThisScan.has(key)) nextNear.add(key);
         }
         if (healthFactor < threshold) {
           belowThreshold++;
@@ -1329,19 +1353,22 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //         cold sweep that will prune.
     //   WATCHLIST: union in new debt holders (e.g. a new borrower); counter unchanged.
     if (doColdSweep) {
-      saveActiveDebt(chainKey, nextActive, 0);
+      // COLD is the authoritative rebuild — stamp it so the time-based floor
+      // measures freshness from this moment.
+      saveActiveDebt(chainKey, nextActive, 0, new Date().toISOString());
     } else {
       // Union new debt holders into the index. Warm sweeps always persist (the
       // counter advances); watchlist cycles persist only when they actually add
       // a wallet, so we don't rewrite Base's multi-thousand-entry index every
-      // cycle for no change.
+      // cycle for no change. Carry lastColdAt forward unchanged — only COLD
+      // refreshes it.
       const merged = new Set(active);
       let added = 0;
       for (const a of nextActive) { if (!merged.has(a)) { merged.add(a); added++; } }
       if (doWarmSweep) {
-        saveActiveDebt(chainKey, merged, warmSweepsSinceCold + 1);
+        saveActiveDebt(chainKey, merged, warmSweepsSinceCold + 1, lastColdAt);
       } else if (added > 0) {
-        saveActiveDebt(chainKey, merged, warmSweepsSinceCold);
+        saveActiveDebt(chainKey, merged, warmSweepsSinceCold, lastColdAt);
       }
     }
 
@@ -1621,18 +1648,24 @@ function resolveChainMinDebtUsd(chainConfig = {}) {
     return 100;
 }
 
-// Per-chain near-tier HF ceiling: <CHAIN>_NEAR_HF → NEAR_HF → default 1.5.
+// Per-chain near-tier HF ceiling: <CHAIN>_NEAR_HF → NEAR_HF → default 1.8.
 // Floored at `watchlistHf` so the near tier is never narrower than the watchlist
 // (≤ watchlistHf effectively disables the extra mid-tier — watch already covers it).
+// Default widened 1.5 → 1.8 (Fix 3): wallets in the 1.5–1.8 band can cross to
+// liquidation in a single volatile move, so re-checking them every cycle (instead
+// of only on the slow warm/cold sweep) closes the window where a healthy-ish whale
+// drops under 1.0 unseen. The near tier is still debt-floored, so this only widens
+// the set of *non-dust* wallets watched — cost scales with real positions, not the
+// 210k borrower set.
 function resolveChainNearHf(chainConfig = {}, watchlistHf = 1.25) {
     const key = (chainConfig.key || "").toUpperCase();
-    const candidates = [key ? process.env[`${key}_NEAR_HF`] : undefined, process.env.NEAR_HF, "1.5"];
+    const candidates = [key ? process.env[`${key}_NEAR_HF`] : undefined, process.env.NEAR_HF, "1.8"];
     for (const raw of candidates) {
       if (raw === undefined || raw === null || raw === "") continue;
       const v = parseFloat(raw);
       if (Number.isFinite(v) && v > 0) return Math.max(v, watchlistHf);
     }
-    return Math.max(1.5, watchlistHf);
+    return Math.max(1.8, watchlistHf);
 }
 
 // Cheap Set equality (used to skip rewriting the near file when unchanged).

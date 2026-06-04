@@ -9,6 +9,11 @@ const DATA_DIR = path.join("/tmp", `liq-active-test-${Date.now()}`);
 process.env.BORROWER_STORE_DIR = DATA_DIR;
 process.env.FULL_SWEEP_EVERY_N = "2";   // warm/cold every 2 watchlist cycles
 process.env.COLD_SWEEP_EVERY_N = "2";   // cold every 2 warm sweeps
+process.env.COLD_MAX_AGE_MIN = "0";     // disable the time-based COLD floor so
+                                        // this test exercises the COUNTER state
+                                        // machine deterministically (all cycles
+                                        // run within seconds, which the time floor
+                                        // would otherwise force to COLD every cycle).
 
 const { getChainConfig } = require("../src/chains");
 const { createProvider } = require("../src/provider");

@@ -162,21 +162,31 @@ function loadActiveDebt(chainKey) {
     return {
       active: new Set((parsed.active || []).map((a) => a.toLowerCase())),
       warmSweepsSinceCold: Number.isFinite(parsed.warmSweepsSinceCold) ? parsed.warmSweepsSinceCold : 0,
+      // When the last COLD (all-borrower) sweep completed. Used as a time-based
+      // floor so COLD can't go stale even if the cycle counters drift (e.g. warm
+      // slicing slows how fast warmSweepsSinceCold accrues). null = never/unknown,
+      // which the caller treats as "due now".
+      lastColdAt: typeof parsed.lastColdAt === "string" ? parsed.lastColdAt : null,
     };
   } catch (error) {
     if (error.code !== "ENOENT") {
       console.warn(`⚠️ Failed to read active-debt index for ${chainKey}: ${error.message}`);
     }
-    return { active: new Set(), warmSweepsSinceCold: 0 };
+    return { active: new Set(), warmSweepsSinceCold: 0, lastColdAt: null };
   }
 }
 
-function saveActiveDebt(chainKey, active, warmSweepsSinceCold) {
+// lastColdAt: ISO timestamp of the COLD sweep that produced this index, or
+// undefined to leave it unchanged from what the caller knows. Only COLD sweeps
+// pass a fresh value; warm/watchlist persists carry the prior one forward so the
+// time-based floor measures from the last *cold* rebuild, not the last write.
+function saveActiveDebt(chainKey, active, warmSweepsSinceCold, lastColdAt) {
   ensureDir();
   const payload = {
     chainKey,
     updatedAt: new Date().toISOString(),
     warmSweepsSinceCold,
+    lastColdAt: lastColdAt || null,
     count: active.size,
     active: Array.from(active),
   };
