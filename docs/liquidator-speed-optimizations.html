@@ -137,8 +137,8 @@
   <div class="rechead"><span class="num">PROGRESS</span><h3 style="margin:0">What's shipped so far</h3></div>
   <p class="small" style="margin-top:6px">Updated 2026-06-03. Items below are <b>committed to <code>main</code> and live on the <code>liquidator-solo-1</code> droplet</b> unless noted. All new behavior defaults to current behavior / is opt-in, so nothing changed at runtime without a flag.</p>
   <div class="statusbar">
-    <span class="statuspill s-done">✓ 1.1 Per-block trigger</span>
-    <span class="statuspill s-done">✓ 1.2 WS/private RPC</span>
+    <span class="statuspill s-done">✓ 1.1 Per-block trigger (LIVE: Arbitrum)</span>
+    <span class="statuspill s-done">✓ 1.2 WS/private RPC (code; WS URLs pending)</span>
     <span class="statuspill s-done">✓ 1.3 Per-chain containers</span>
     <span class="statuspill s-done">✓ 2.1 Lean submit path</span>
     <span class="statuspill s-done">✓ 2.2 Batched enrichment</span>
@@ -231,12 +231,12 @@
 <div class="card rec rank1 done">
   <div class="rechead"><span class="num">1.1</span><h3>Per-block watchlist re-check</h3></div>
   <div class="chips">
-    <span class="chip shipped">✓ Shipped (flag-gated, OFF)</span>
+    <span class="chip shipped">✓ LIVE on Arbitrum · others gated</span>
     <span class="chip impact-hi">Impact: very high</span>
     <span class="chip effort-md">Effort: medium</span>
     <span class="chip risk">Latency: ≤15s → ~1 block</span>
   </div>
-  <div class="donenote"><b>Done as designed.</b> <code>bot.js</code> <code>runWatchlistCheck()</code> behind <code>BLOCK_TRIGGER=true</code> (default off). Runs <em>alongside</em> the 15s poll (which keeps maintaining the watchlist) with a <b>shared per-chain <code>lock.inFlight</code> guard</b> so the two never run concurrently — no double-submit / nonce stampede. Honors <code>TEST_MODE</code>. Uses a WS endpoint if configured (1.2), else HTTP block polling. <b>Still OFF in prod</b> until private/WS RPCs are set. Verified live on Avalanche (TEST_MODE): fired ~every 2s block, watchlist checks 118–231ms, guard interleaved correctly, 0 txs.</div>
+  <div class="donenote"><b>Done + partially activated.</b> <code>bot.js</code> <code>runWatchlistCheck()</code> behind <code>BLOCK_TRIGGER=true</code>. Runs <em>alongside</em> the 15s poll (which keeps maintaining the watchlist) with a <b>shared per-chain <code>lock.inFlight</code> guard</b> so the two never run concurrently. Honors <code>TEST_MODE</code>. Uses a WS endpoint if configured (1.2), else HTTP block polling. <b>ENABLED LIVE on Arbitrum (2026-06-03)</b> — the one chain with a private RPC (HTTP block-poll on the private endpoint; verified per-block events firing ~1s, restarts=0, 0 throttle errors). The other 4 chains stay on the 15s poll until WebSocket endpoints are funded (public RPCs won't sustain per-block load — the design-doc-approved path is WS push). Flip on per chain via the <code>bot-&lt;chain&gt;</code> compose <code>environment:</code>.</div>
   <p>Subscribe to new blocks and re-sweep <em>only the watchlist</em> (the near-threshold, non-dust wallets you already maintain) every block, instead of waiting for the 15s tick. The watchlist is tens–hundreds of addresses, so a Multicall3 sweep of it is ~100–300ms — cheap enough to run per block. Keep the full/warm/cold sweeps on their existing slower cadence to refresh the watchlist.</p>
   <span class="lbl">Today</span>
   <p class="now">Every chain does <code>while(true){ getUnhealthyPositions(); sleep(15s) }</code> — <span class="path">bot.js:90–110</span>. A position that crosses HF&lt;1 and is taken in the next block is gone ~14s before we look.</p>
