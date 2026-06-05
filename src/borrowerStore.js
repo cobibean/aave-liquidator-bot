@@ -8,6 +8,7 @@ const path = require("path");
 // (incremental scans of only-new blocks thereafter).
 
 const DATA_DIR = process.env.BORROWER_STORE_DIR || path.join(__dirname, "..", "data");
+const BACKFILL_VERSION = 2;
 
 function storePath(chainKey) {
   return path.join(DATA_DIR, `borrowers-${chainKey}.json`);
@@ -19,6 +20,10 @@ function watchlistPath(chainKey) {
 
 function nearPath(chainKey) {
   return path.join(DATA_DIR, `near-${chainKey}.json`);
+}
+
+function hotPath(chainKey) {
+  return path.join(DATA_DIR, `hot-${chainKey}.json`);
 }
 
 function activeDebtPath(chainKey) {
@@ -45,12 +50,23 @@ function loadBorrowerSet(chainKey) {
       lastScannedBlock: Number.isFinite(parsed.lastScannedBlock) ? parsed.lastScannedBlock : null,
       backfillCursor: Number.isFinite(parsed.backfillCursor) ? parsed.backfillCursor : null,
       backfillDone: Boolean(parsed.backfillDone),
+      backfillFloorBlock: Number.isFinite(parsed.backfillFloorBlock) ? parsed.backfillFloorBlock : null,
+      backfillSource: typeof parsed.backfillSource === "string" ? parsed.backfillSource : null,
+      backfillVersion: Number.isFinite(parsed.backfillVersion) ? parsed.backfillVersion : null,
     };
   } catch (error) {
     if (error.code !== "ENOENT") {
       console.warn(`⚠️ Failed to read borrower store for ${chainKey}: ${error.message}`);
     }
-    return { borrowers: new Set(), lastScannedBlock: null, backfillCursor: null, backfillDone: false };
+    return {
+      borrowers: new Set(),
+      lastScannedBlock: null,
+      backfillCursor: null,
+      backfillDone: false,
+      backfillFloorBlock: null,
+      backfillSource: null,
+      backfillVersion: null,
+    };
   }
 }
 
@@ -64,6 +80,9 @@ function saveBorrowerSet(chainKey, borrowers, lastScannedBlock, meta = {}) {
     lastScannedBlock,
     backfillCursor: Number.isFinite(meta.backfillCursor) ? meta.backfillCursor : null,
     backfillDone: Boolean(meta.backfillDone),
+    backfillFloorBlock: Number.isFinite(meta.backfillFloorBlock) ? meta.backfillFloorBlock : null,
+    backfillSource: typeof meta.backfillSource === "string" ? meta.backfillSource : null,
+    backfillVersion: Number.isFinite(meta.backfillVersion) ? meta.backfillVersion : null,
     updatedAt: new Date().toISOString(),
     count: borrowers.size,
     borrowers: Array.from(borrowers),
@@ -146,6 +165,35 @@ function saveNear(chainKey, near) {
   fs.renameSync(tmpPath, finalPath);
 }
 
+// Hot set = the tiny trigger tier. Block/price triggers scan this set only, so it
+// must stay much smaller than the broader every-cycle near tier.
+function loadHot(chainKey) {
+  try {
+    const raw = fs.readFileSync(hotPath(chainKey), "utf-8");
+    const parsed = JSON.parse(raw);
+    return { hot: new Set((parsed.hot || []).map((a) => a.toLowerCase())) };
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`⚠️ Failed to read hot set for ${chainKey}: ${error.message}`);
+    }
+    return { hot: new Set() };
+  }
+}
+
+function saveHot(chainKey, hot) {
+  ensureDir();
+  const payload = {
+    chainKey,
+    updatedAt: new Date().toISOString(),
+    count: hot.size,
+    hot: Array.from(hot),
+  };
+  const finalPath = hotPath(chainKey);
+  const tmpPath = `${finalPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(payload));
+  fs.renameSync(tmpPath, finalPath);
+}
+
 // Active-debt index = the subset of known borrowers observed carrying debt
 // (totalDebtBase > 0) in the last cold sweep, plus newly-discovered borrowers.
 // The expensive "full" health-factor sweep iterates THIS set instead of every
@@ -197,6 +245,7 @@ function saveActiveDebt(chainKey, active, warmSweepsSinceCold, lastColdAt) {
 }
 
 module.exports = {
+  BACKFILL_VERSION,
   DATA_DIR,
   loadBorrowerSet,
   saveBorrowerSet,
@@ -204,6 +253,8 @@ module.exports = {
   saveWatchlist,
   loadNear,
   saveNear,
+  loadHot,
+  saveHot,
   loadActiveDebt,
   saveActiveDebt,
 };

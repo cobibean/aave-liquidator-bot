@@ -9,6 +9,7 @@
 //
 // Record types (the `ev` field):
 //   sweep   — one per HF sweep: chain, type, set size, sweep ms, block, candidates
+//   trigger_scan — throttled block/price trigger scans over the persisted hot tier
 //   attempt — one per attemptLiquidation: chain, user, hf, the per-stage timings
 //             (decideMs = enrich+sim+floor before broadcast; deliverMs = broadcast
 //             → receipt), outcome (precheck_fail / testmode / sent / mined /

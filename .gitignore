@@ -11,3 +11,7 @@ digitalocean
 *_dsa
 *.pem
 *.key
+
+# graphify tooling artifacts (knowledge-graph cache + scratch outputs)
+.graphify_*.json
+graphify-out/

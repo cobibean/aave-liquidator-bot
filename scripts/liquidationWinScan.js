@@ -104,7 +104,7 @@ async function scanChain(key, cfg, hours) {
 async function runWinScan({ hours, chains } = {}) {
   const cfg = loadChainConfigs();
   const h = Number(hours || process.env.SCAN_HOURS || 12);
-  const live = (chains || process.env.SCAN_CHAINS || "plasma,arbitrum,base,avalanche,optimism")
+  const live = (chains || process.env.SCAN_CHAINS || "arbitrum,base,avalanche,optimism")
     .toString()
     .split(",")
     .map((s) => s.trim())

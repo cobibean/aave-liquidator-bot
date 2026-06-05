@@ -1,18 +1,17 @@
 require("dotenv").config();
 
 // LOSS ATTRIBUTION (read-only, on-demand). For each recently-liquidated Aave
-// position, classify WHY we didn't win it — Detect, Decide/Deliver, or "we won":
+// position, classify WHY we didn't win it using the current borrower/near/watch/hot
+// files. This is approximate unless run against pre-liquidation snapshots, because
+// users may drop out of hot tiers after another liquidator repays debt.
 //
 //   WON          — our wallet is the `liquidator` on the LiquidationCall.
 //   DETECT loss  — the user was NOT in our persisted borrower store (we never
 //                  would have looked at them) → discovery gap.
-//   WATCHLIST gap — user was in the store but NOT in the hot watchlist (we'd only
-//                  have caught them on a slower full/warm sweep, not per-block).
-//   DECIDE/DELIVER loss — user was in our watchlist (we were tracking them closely)
-//                  but a competitor still landed it → we lost on speed of
-//                  deciding/sending, OR it was an atomic same-block liquidation we
-//                  can't compete with on public RPCs. Cross-reference the bot's
-//                  `📊 METRIC ev=attempt` logs for that user to tell which.
+//   COLD/WARM gap — user was in the store but NOT in near (only slower sweeps).
+//   NEAR-only      — user was in near but not watch.
+//   WATCH-only     — user was in watch but not hot.
+//   HOT race       — user was in hot but a competitor still landed it.
 //
 // This answers the question that gates Batch 4: are we losing because we don't
 // SEE the targets (Detect — needs discovery/coverage work) or because we see them
@@ -31,7 +30,7 @@ require("dotenv").config();
 const { ethers } = require("ethers");
 const { getSelectedChainConfigs, getChainConfig } = require("../src/chains");
 const { createProvider } = require("../src/provider");
-const { loadBorrowerSet, loadWatchlist } = require("../src/borrowerStore");
+const { loadBorrowerSet, loadWatchlist, loadNear, loadHot } = require("../src/borrowerStore");
 const { resolveChainMinDebtUsd } = require("../aaveHelpers");
 
 const LIQUIDATION_ABI = [
@@ -77,6 +76,8 @@ async function classifyChain(chainConfig, liquidatorAddr) {
 
   const { borrowers } = loadBorrowerSet(chainConfig.key);
   const { watch } = loadWatchlist(chainConfig.key);
+  const { near } = loadNear(chainConfig.key);
+  const { hot } = loadHot(chainConfig.key);
   const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
 
   // We only care about SIZEABLE liquidations (dust is economically meaningless and
@@ -88,19 +89,25 @@ async function classifyChain(chainConfig, liquidatorAddr) {
     return units >= minDebtUsd;
   });
 
-  const buckets = { won: 0, detect: 0, watchlistGap: 0, decideDeliver: 0 };
-  const examples = { detect: [], watchlistGap: [], decideDeliver: [] };
+  const buckets = { won: 0, detect: 0, coldWarmGap: 0, nearOnly: 0, watchOnly: 0, hotRace: 0 };
+  const examples = { detect: [], coldWarmGap: [], nearOnly: [], watchOnly: [], hotRace: [] };
   for (const e of sizeableEvents) {
     if (liquidatorAddr && e.liquidator === liquidatorAddr) { buckets.won++; continue; }
     if (!borrowers.has(e.user)) {
       buckets.detect++;
       if (examples.detect.length < 3) examples.detect.push(e.user);
+    } else if (!near.has(e.user)) {
+      buckets.coldWarmGap++;
+      if (examples.coldWarmGap.length < 3) examples.coldWarmGap.push(e.user);
     } else if (!watch.has(e.user)) {
-      buckets.watchlistGap++;
-      if (examples.watchlistGap.length < 3) examples.watchlistGap.push(e.user);
+      buckets.nearOnly++;
+      if (examples.nearOnly.length < 3) examples.nearOnly.push(e.user);
+    } else if (!hot.has(e.user)) {
+      buckets.watchOnly++;
+      if (examples.watchOnly.length < 3) examples.watchOnly.push(e.user);
     } else {
-      buckets.decideDeliver++;
-      if (examples.decideDeliver.length < 3) examples.decideDeliver.push(e.user);
+      buckets.hotRace++;
+      if (examples.hotRace.length < 3) examples.hotRace.push(e.user);
     }
   }
 
@@ -108,7 +115,9 @@ async function classifyChain(chainConfig, liquidatorAddr) {
     chain: chainConfig.name,
     window,
     storeSize: borrowers.size,
+    nearSize: near.size,
     watchSize: watch.size,
+    hotSize: hot.size,
     minDebtUsd,
     totalLiquidations: events.length,
     sizeable: sizeableEvents.length,
@@ -130,20 +139,23 @@ async function main() {
     try {
       const r = await classifyChain(cfg, liquidatorAddr);
       const b = r.buckets;
-      const lost = b.detect + b.watchlistGap + b.decideDeliver;
-      console.log(`━━ ${r.chain} ━━ (last ~${r.window} blocks; store ${r.storeSize}, watch ${r.watchSize}, floor $${r.minDebtUsd})`);
+      const lost = b.detect + b.coldWarmGap + b.nearOnly + b.watchOnly + b.hotRace;
+      console.log(`━━ ${r.chain} ━━ (last ~${r.window} blocks; store ${r.storeSize}, near ${r.nearSize}, watch ${r.watchSize}, hot ${r.hotSize}, floor $${r.minDebtUsd})`);
       console.log(`   ${r.totalLiquidations} total liquidations, ${r.sizeable} sizeable (≥$${r.minDebtUsd})`);
-      console.log(`   WON ${b.won}  |  LOST ${lost}  →  DETECT ${b.detect}  ·  WATCHLIST-gap ${b.watchlistGap}  ·  DECIDE/DELIVER ${b.decideDeliver}`);
-      if (b.decideDeliver > 0) console.log(`     ↳ DECIDE/DELIVER (we were tracking, still lost): ${r.examples.decideDeliver.join(", ")}`);
-      if (b.watchlistGap > 0) console.log(`     ↳ WATCHLIST-gap (in store, not hot): ${r.examples.watchlistGap.join(", ")}`);
+      console.log(`   WON ${b.won}  |  LOST ${lost}  →  DETECT ${b.detect}  ·  COLD/WARM ${b.coldWarmGap}  ·  NEAR-only ${b.nearOnly}  ·  WATCH-only ${b.watchOnly}  ·  HOT-race ${b.hotRace}`);
+      if (b.hotRace > 0) console.log(`     ↳ HOT race (in hot, still lost): ${r.examples.hotRace.join(", ")}`);
+      if (b.watchOnly > 0) console.log(`     ↳ WATCH-only (in watch, not hot): ${r.examples.watchOnly.join(", ")}`);
+      if (b.nearOnly > 0) console.log(`     ↳ NEAR-only (in near, not watch): ${r.examples.nearOnly.join(", ")}`);
+      if (b.coldWarmGap > 0) console.log(`     ↳ COLD/WARM gap (in store, not near): ${r.examples.coldWarmGap.join(", ")}`);
       if (b.detect > 0) console.log(`     ↳ DETECT (never in store): ${r.examples.detect.join(", ")}`);
+      console.log("     ↳ Note: current tier files are approximate after liquidation; pre-event snapshots are definitive.");
       console.log("");
     } catch (e) {
       console.log(`━━ ${cfg.name} ━━ ERROR: ${e.message}\n`);
     }
   }
-  console.log("Interpretation: DETECT/WATCHLIST-gap → discovery/coverage work. DECIDE/DELIVER →");
-  console.log("speed (per-block trigger / faster send / gas) OR unbeatable same-block atomic.");
+  console.log("Interpretation: DETECT/COLD-WARM/NEAR/WATCH gaps → coverage/tiering work. HOT-race →");
+  console.log("speed (faster send / gas / infra) OR unbeatable same-block atomic.");
   console.log("Cross-ref the bot's '📊 METRIC ev=attempt' logs for the named users to confirm.");
   process.exit(0);
 }

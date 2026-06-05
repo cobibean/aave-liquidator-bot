@@ -56,11 +56,14 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } ca
 
   const active = readJson(path.join(DATA_DIR, `active-debt-${chainKey}.json`));
   const watch = readJson(path.join(DATA_DIR, `watchlist-${chainKey}.json`));
+  const near = readJson(path.join(DATA_DIR, `near-${chainKey}.json`));
+  const hot = readJson(path.join(DATA_DIR, `hot-${chainKey}.json`));
 
   console.log("\n=== sweep sequence ===");
   sweepLog.forEach((s, i) => console.log(`  cycle ${i + 1}: ${s.type} (${s.size})`));
   console.log("active-debt index:", active ? { count: active.count, warmSweepsSinceCold: active.warmSweepsSinceCold } : "MISSING");
   console.log("watchlist:", watch ? { count: watch.count, cyclesSinceFullSweep: watch.cyclesSinceFullSweep } : "MISSING");
+  console.log("near/hot:", { near: near ? near.count : "MISSING", hot: hot ? hot.count : "MISSING" });
 
   // Assertions. Expected sequence for FULL=2, COLD=2 over 10 cycles:
   //   COLD, wl, wl, WARM, wl, wl, WARM, wl, wl, COLD
@@ -81,6 +84,16 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } ca
   const warmSweep = sweepLog.find((s) => s.type === "WARM");
   if (warmSweep && warmSweep.size > coldSize) fails.push(`WARM sweep (${warmSweep.size}) larger than COLD (${coldSize})`);
   if (!active) fails.push("active-debt index not persisted");
+  if (!near) fails.push("near set not persisted");
+  if (!hot) fails.push("hot set not persisted");
+  if (hot && watch && near) {
+    const watchSet = new Set(watch.watch || []);
+    const nearSet = new Set(near.near || []);
+    for (const h of hot.hot || []) {
+      if (!watchSet.has(h)) fails.push(`hot user ${h} missing from watchlist`);
+      if (!nearSet.has(h)) fails.push(`hot user ${h} missing from near set`);
+    }
+  }
 
   console.log("\n" + (fails.length === 0 ? "✅ active-debt sweep state machine OK" : "❌ FAILURES:\n  - " + fails.join("\n  - ")));
   fs.rmSync(DATA_DIR, { recursive: true, force: true });

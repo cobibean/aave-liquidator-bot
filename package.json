@@ -11,6 +11,8 @@
     "droplet:room": "node scripts/checkDropletRoom.js",
     "monitor:start": "npm start --prefix monitor",
     "monitor:test": "npm test --prefix monitor",
+    "test:aave-errors": "node scripts/testAaveErrorDecode.js",
+    "test:backfill-metadata": "node scripts/testBackfillMetadata.js",
     "test": "npm run smoke:chains"
   },
   "keywords": [],

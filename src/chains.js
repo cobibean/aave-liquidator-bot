@@ -61,8 +61,8 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 300_000,
     borrowScanChunkSize: 25_000,
-    borrowBackfillBlocks: 130_000_000, // max-depth cap; > deployment depth (~43M) so Arbitrum backfills fully
-    deploymentBlock: 426_768_359, // Aave v3 Pool first code block (binary-searched)
+    borrowBackfillBlocks: 500_000_000, // max-depth cap; > deployment depth (~463M) so Arbitrum backfills fully
+    deploymentBlock: 7_742_429, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7",
     wrappedNative: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     // Chainlink ETH/USD proxy (Aave oracle source for WETH collateral). The
@@ -123,7 +123,7 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 250_000,
     borrowScanChunkSize: 5_000,
-    borrowBackfillBlocks: 15_811_200, // ~366-day cap @ ~2s blocks (full deployment ~148M is ~30h on public RPC)
+    borrowBackfillBlocks: 200_000_000, // max-depth cap; > deployment depth (~148M) so Optimism backfills fully
     deploymentBlock: 4_365_693, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xD81eb3728a631871a7eBBaD631b5f424909f0c77",
     wrappedNative: "0x4200000000000000000000000000000000000006",
@@ -189,7 +189,7 @@ const CHAIN_CONFIGS = {
     liquidationGasLimit: 2_000_000,
     borrowScanBlocks: 40_000,
     borrowScanChunkSize: 2_000,
-    borrowBackfillBlocks: 15_811_200, // ~366-day cap @ ~2s blocks (full deployment ~75M is ~30h on public RPC)
+    borrowBackfillBlocks: 100_000_000, // max-depth cap; > deployment depth (~75M) so Avalanche backfills fully
     deploymentBlock: 11_970_506, // Aave v3 Pool first code block (binary-searched)
     priceOracle: "0xEBd36016B3eD09D4693Ed4251c67Bd858c3c7C9C",
     wrappedNative: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
@@ -224,7 +224,7 @@ const CHAIN_CONFIGS = {
   },
 };
 
-const DEFAULT_CHAIN_KEYS = ["plasma", "arbitrum", "base", "avalanche", "optimism"];
+const DEFAULT_CHAIN_KEYS = ["arbitrum", "base", "avalanche", "optimism"];
 
 function getChainConfig(key) {
   const normalizedKey = normalizeChainKey(key || process.env.CHAIN || "arbitrum");

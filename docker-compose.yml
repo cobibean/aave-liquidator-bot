@@ -12,7 +12,7 @@
 # CHAIN in src/chains.js, and `environment` overrides `env_file`, so this pins it).
 #
 # Per-chain heap caps fit the 4 GB droplet: Base biggest (full 210k COLD sweep),
-# the rest smaller. Sum of --max-old-space-size = 2560 MB; mem_limit gives Docker
+# the rest smaller. Sum of --max-old-space-size = 2176 MB; mem_limit gives Docker
 # a hard ceiling (~heap + non-heap overhead) so a runaway chain restarts cleanly
 # instead of OOM-ing the host. The streaming sweep peaks ~130 MB even at 210k, so
 # these caps are generous headroom, not tight fits.
@@ -49,11 +49,6 @@ services:
       CHAINS: "arbitrum"
       TEST_MODE: "${TEST_MODE:-true}"
       VERBOSE_HEALTH_LOGS: "${VERBOSE_HEALTH_LOGS:-false}"
-      # Per-block watchlist trigger (1.1) — ENABLED ON ARBITRUM ONLY (it's the one
-      # chain with a private RPC, ARBITRUM_RPC_URL). No WS URL set, so this uses
-      # HTTP block-polling on the private endpoint (lower throttle risk than the
-      # public RPCs the other chains use — hence not enabled fleet-wide yet).
-      BLOCK_TRIGGER: "true"
     command: ["node", "--max-old-space-size=512", "bot.js"]
     mem_limit: 768m
 
@@ -77,16 +72,6 @@ services:
     command: ["node", "--max-old-space-size=384", "bot.js"]
     mem_limit: 640m
 
-  bot-plasma:
-    <<: *bot-common
-    container_name: bot-plasma
-    environment:
-      CHAINS: "plasma"
-      TEST_MODE: "${TEST_MODE:-true}"
-      VERBOSE_HEALTH_LOGS: "${VERBOSE_HEALTH_LOGS:-false}"
-    command: ["node", "--max-old-space-size=384", "bot.js"]
-    mem_limit: 640m
-
   liquidator-monitor:
     build:
       context: .
@@ -95,21 +80,22 @@ services:
     restart: unless-stopped
     user: "0:0"
     environment:
-      MONITOR_HOST: "0.0.0.0"
-      MONITOR_PORT: "8787"
-      # With per-chain containers there is no single bot container; point the
-      # dashboard at one by default (Base = heaviest/most interesting). Override
-      # MONITOR_BOT_CONTAINER to watch a different chain. Borrower-store inspection
-      # still covers all chains via the shared data volume below.
-      MONITOR_BOT_CONTAINER: "${MONITOR_BOT_CONTAINER:-bot-base}"
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-3000}"
+      # With per-chain containers there is no single bot container; inspect the
+      # whole fleet and combine recent logs for the dashboard.
+      MONITOR_BOT_CONTAINERS: "${MONITOR_BOT_CONTAINERS:-bot-arbitrum,bot-base,bot-avalanche,bot-optimism}"
       MONITOR_BORROWER_DATA_DIR: "/bot-data"
       MONITOR_STATUS_LOG_WINDOW: "${MONITOR_STATUS_LOG_WINDOW:-12h}"
       MONITOR_STALE_LOG_MINUTES: "${MONITOR_STALE_LOG_MINUTES:-30}"
       MONITOR_MAX_LOG_LINES: "${MONITOR_MAX_LOG_LINES:-2000}"
     ports:
-      - "127.0.0.1:${MONITOR_PORT:-8787}:8787"
+      # Bind host listeners only on loopback and the droplet's Tailscale IP, not
+      # public 0.0.0.0. This supports both local and tailnet curl checks.
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+      - "${MONITOR_BIND_IP:-100.69.114.114}:${PORT:-3000}:${PORT:-3000}"
     volumes:
-      # Docker socket access lets the monitor inspect the named bot container and
+      # Docker socket access lets the monitor inspect the named bot containers and
       # read logs. Treat this as powerful host access even though the mount is
       # marked read-only, and expose the service only over private Tailscale.
       - /var/run/docker.sock:/var/run/docker.sock:ro

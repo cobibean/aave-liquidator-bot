@@ -10,12 +10,14 @@ const {
   getReservesListCached,
   resolveChainMinDebtUsd,
   resolveSwapPath,
+  mapWithConcurrency,
 } = require("./aaveHelpers");
 const { getSelectedChainConfigs } = require("./src/chains");
 const { getTransactionOverrides } = require("./src/gas");
 const { createProvider, createBlockProvider } = require("./src/provider");
-const { loadWatchlist } = require("./src/borrowerStore");
+const { loadHot } = require("./src/borrowerStore");
 const { NonceManager, maxInFlight } = require("./src/nonceManager");
+const { compactRevertReason } = require("./src/aaveErrorDecoder");
 const metrics = require("./src/metrics");
 
 const requiredEnv = ["PRIVATE_KEY"];
@@ -47,6 +49,75 @@ const AAVE_ORACLE_ABI = ["function getAssetPrice(address asset) view returns (ui
 // liquidation attempt in a burst. Default 5s; tune with ORACLE_PRICE_TTL_MS.
 const oraclePriceCache = new Map(); // `${chainKey}:${asset}` -> { price, fetchedAt }
 const ORACLE_PRICE_TTL_MS = parseInt(process.env.ORACLE_PRICE_TTL_MS || "5000", 10);
+const lastTriggerScanLogAt = new Map();
+const precheckFailureUntil = new Map();
+
+function shouldLogTriggerScan(chainKey, foundLiquidatable) {
+  if (foundLiquidatable) return true;
+  const intervalMs = parseInt(process.env.TRIGGER_SCAN_LOG_INTERVAL_MS || "60000", 10);
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return false;
+  const now = Date.now();
+  const last = lastTriggerScanLogAt.get(chainKey) || 0;
+  if (now - last < intervalMs) return false;
+  lastTriggerScanLogAt.set(chainKey, now);
+  return true;
+}
+
+function precheckCooldownMs() {
+  const value = parseInt(process.env.PRECHECK_FAIL_COOLDOWN_MS || "30000", 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function precheckCooldownKey(chainKey, user) {
+  return `${chainKey || "default"}:${String(user).toLowerCase()}`;
+}
+
+function isPrecheckCoolingDown(chainKey, user) {
+  const until = precheckFailureUntil.get(precheckCooldownKey(chainKey, user)) || 0;
+  if (until <= Date.now()) return false;
+  return true;
+}
+
+function rememberPrecheckFailure(chainKey, user) {
+  const ms = precheckCooldownMs();
+  if (ms > 0) precheckFailureUntil.set(precheckCooldownKey(chainKey, user), Date.now() + ms);
+}
+
+function clearPrecheckFailure(chainKey, user) {
+  precheckFailureUntil.delete(precheckCooldownKey(chainKey, user));
+}
+
+function normalizeLiquidationBaskets(position) {
+  const primary = {
+    debtAsset: position.debtAsset,
+    debtAmount: position.debtAmount,
+    debtDecimals: position.debtDecimals || 18,
+    debtSymbol: position.debtSymbol || "debt asset",
+    collateralAsset: position.collateralAsset,
+    basketLabel: position.basketLabel || "primary",
+  };
+  const raw = Array.isArray(position.liquidationBaskets) && position.liquidationBaskets.length > 0
+    ? position.liquidationBaskets
+    : [primary];
+  const seen = new Set();
+  const baskets = [];
+  for (const basket of [...raw, primary]) {
+    if (!basket || !basket.debtAsset || !basket.collateralAsset) continue;
+    if (!ethers.BigNumber.isBigNumber(basket.debtAmount) || basket.debtAmount.lte(ethers.constants.Zero)) continue;
+    const key = `${basket.debtAsset.toLowerCase()}:${basket.collateralAsset.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    baskets.push({
+      debtAsset: basket.debtAsset,
+      debtAmount: basket.debtAmount,
+      debtDecimals: basket.debtDecimals || primary.debtDecimals,
+      debtSymbol: basket.debtSymbol || primary.debtSymbol,
+      collateralAsset: basket.collateralAsset,
+      basketLabel: basket.basketLabel || `${basket.debtSymbol || primary.debtSymbol}->${basket.collateralAsset.slice(0, 8)}`,
+    });
+  }
+  return baskets;
+}
 
 async function getOraclePriceCached(oracle, chainKey, asset) {
   const key = `${chainKey}:${String(asset).toLowerCase()}`;
@@ -225,16 +296,16 @@ async function runChainBot(chainConfig) {
   }
 }
 
-// Per-block hot path: re-check ONLY the persisted watchlist (near-threshold,
+// Per-block hot path: re-check ONLY the persisted hot tier (HF close to 1,
 // non-dust wallets the sweep already identified). This is intentionally tiny and
-// fast — a single Multicall3 read of tens–hundreds of addresses (~100–300ms) —
+// fast — a single Multicall3 read of tens/hundreds of addresses —
 // so it can run every block. Anything that crosses HF<1 here is enriched (one
 // batched read each, concurrently) and attempted immediately. The full/warm/cold
-// sweeps in the poll loop are what keep the watchlist populated; this only reacts.
+// sweeps in the poll loop are what keep the hot tier populated; this only reacts.
 async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract, nonceManager }, blockNumber) {
   const chainKey = chainConfig.key || "default";
-  const { watch } = loadWatchlist(chainKey);
-  if (!watch || watch.size === 0) return;
+  const { hot } = loadHot(chainKey);
+  if (!hot || hot.size === 0) return;
 
   // Source tag for logs: a block number (per-block trigger) or "price-update"
   // (Chainlink AnswerUpdated trigger, which passes no block number).
@@ -243,19 +314,30 @@ async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract
   const minDebtUsd = resolveChainMinDebtUsd(chainConfig);
 
   const t0 = Date.now();
-  const hfs = await getUserHealthFactorsBatched([...watch], provider, chainConfig);
+  const hfs = await getUserHealthFactorsBatched([...hot], provider, chainConfig);
   const liq = hfs
     .filter((h) => Number.isFinite(h.healthFactor) && h.healthFactor < threshold && h.totalDebtUsd >= minDebtUsd)
     .sort((a, b) => a.healthFactor - b.healthFactor);
+  const scanMs = Date.now() - t0;
+  if (shouldLogTriggerScan(chainKey, liq.length > 0)) {
+    metrics.emit("trigger_scan", {
+      chain: chainKey,
+      source: blockNumber != null ? "block" : "price",
+      block: blockNumber,
+      hot: hot.size,
+      scanMs,
+      below: liq.length,
+    });
+  }
 
   if (liq.length === 0) {
     if (process.env.VERBOSE_HEALTH_LOGS === "true") {
-      console.log(`   ⛓️ ${chainConfig.name}: ${at} watchlist ${watch.size} clean (${Date.now() - t0}ms).`);
+      console.log(`   ⛓️ ${chainConfig.name}: ${at} hot ${hot.size} clean (${scanMs}ms).`);
     }
     return;
   }
 
-  console.log(`🔔 ${chainConfig.name}: ${at} — ${liq.length} watchlist position(s) below ${threshold} (${Date.now() - t0}ms).`);
+  console.log(`🔔 ${chainConfig.name}: ${at} — ${liq.length} hot position(s) below ${threshold} (${scanMs}ms).`);
 
   // Enrich the urgent ones concurrently (each a single batched read), then
   // attempt in lowest-HF-first order. attemptLiquidation honors TEST_MODE.
@@ -264,21 +346,26 @@ async function runWatchlistCheck({ provider, chainConfig, aaveLiquidatorContract
     : [];
   const minDebtToCover = parseFloat(process.env.MIN_DEBT_TO_COVER || "0.099");
 
-  for (const { user, healthFactor, totalDebtUsd } of liq) {
+  const enrichConcurrency = parseInt(process.env.TRIGGER_ENRICH_CONCURRENCY || "10", 10);
+  const enriched = await mapWithConcurrency(liq, enrichConcurrency, async ({ user, healthFactor, totalDebtUsd }) => {
     let position;
     try {
       position = await enrichCandidateBatched(user, provider, chainConfig, reserves);
     } catch (error) {
       console.warn(`⚠️ ${chainConfig.name}: enrichment failed for ${user}: ${error.message}`);
-      continue;
+      return null;
     }
-    if (!position) continue;
+    if (!position) return null;
 
     const debtInUnits = parseFloat(ethers.utils.formatUnits(position.debtAmount, position.debtDecimals));
-    if (debtInUnits < minDebtToCover) continue;
+    if (debtInUnits < minDebtToCover) return null;
 
+    return { ...position, user, healthFactor, totalDebtUsd };
+  });
+
+  for (const position of enriched.filter(Boolean)) {
     await attemptLiquidation(
-      { ...position, user, healthFactor, totalDebtUsd },
+      position,
       { provider, chainConfig, aaveLiquidatorContract, nonceManager }
     );
   }
@@ -293,21 +380,38 @@ function delay(ms) {
 // This is the bot-side half of the profitability gate; the hardened contract's
 // minProfit floor is the on-chain half. Works against both the current and
 // hardened contract (both expose triggerLiquidation with the same signature).
-async function simulateLiquidation(contract, { debtAsset, debtToCover, user, collateralAsset, provider, chainConfig, gasPrice, swapPath }) {
+async function simulateLiquidation(contract, {
+  debtAsset,
+  debtToCover,
+  user,
+  collateralAsset,
+  provider,
+  chainConfig,
+  gasPrice,
+  swapPath,
+  minProfitForCall,
+}) {
   // Mirror the entrypoint we'll actually broadcast so the callStatic gate is a
   // true freshness/profitability check. On path-aware chains with a resolved
-  // path, simulate triggerLiquidationWithPath (floor 0 keeps the gate purely
-  // about whether the swap+repay path works; the real floor is enforced at send).
+  // path, simulate triggerLiquidationWithPath with the same dynamic floor as
+  // send; floor 0 still leaves the contract's stored floor in force.
+  const profitFloor = minProfitForCall || ethers.constants.Zero;
   const usePath = !!swapPath && swapPath !== "0x" && chainConfig.pathAware &&
     contract.callStatic.triggerLiquidationWithPath;
   try {
     if (usePath) {
-      await contract.callStatic.triggerLiquidationWithPath(debtAsset, debtToCover, user, collateralAsset, 0, swapPath);
+      await contract.callStatic.triggerLiquidationWithPath(
+        debtAsset, debtToCover, user, collateralAsset, profitFloor, swapPath
+      );
+    } else if (chainConfig.hardenedLiquidator && minProfitForCall && contract.callStatic.triggerLiquidationWithMinProfit) {
+      await contract.callStatic.triggerLiquidationWithMinProfit(
+        debtAsset, debtToCover, user, collateralAsset, minProfitForCall
+      );
     } else {
       await contract.callStatic.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset);
     }
   } catch (error) {
-    const reason = error.reason || error.errorName || error.error?.message || error.message || "revert";
+    const reason = compactRevertReason(error);
     return { ok: false, reason: String(reason).slice(0, 160) };
   }
 
@@ -316,10 +420,21 @@ async function simulateLiquidation(contract, { debtAsset, debtToCover, user, col
   // submit path instead of re-fetching it here).
   let estGasCostNative = null;
   try {
+    let gasEstimatePromise;
+    if (usePath) {
+      gasEstimatePromise = contract.estimateGas.triggerLiquidationWithPath(
+        debtAsset, debtToCover, user, collateralAsset, profitFloor, swapPath
+      );
+    } else if (chainConfig.hardenedLiquidator && minProfitForCall && contract.estimateGas.triggerLiquidationWithMinProfit) {
+      gasEstimatePromise = contract.estimateGas.triggerLiquidationWithMinProfit(
+        debtAsset, debtToCover, user, collateralAsset, minProfitForCall
+      );
+    } else {
+      gasEstimatePromise = contract.estimateGas.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset);
+    }
+
     const [gasEstimate, livePrice] = await Promise.all([
-      usePath
-        ? contract.estimateGas.triggerLiquidationWithPath(debtAsset, debtToCover, user, collateralAsset, 0, swapPath)
-        : contract.estimateGas.triggerLiquidation(debtAsset, debtToCover, user, collateralAsset),
+      gasEstimatePromise,
       gasPrice ? Promise.resolve(gasPrice) : provider.getGasPrice(),
     ]);
     estGasCostNative = ethers.utils.formatEther(gasEstimate.mul(livePrice));
@@ -331,28 +446,138 @@ async function simulateLiquidation(contract, { debtAsset, debtToCover, user, col
   return { ok: true, reason: "ok", estGasCostNative };
 }
 
+function pushDebtToCoverOption(options, seen, label, amount, debtDecimals, minDebtToCoverRaw) {
+  if (!amount || !ethers.BigNumber.isBigNumber(amount) || amount.lte(ethers.constants.Zero)) return;
+  if (minDebtToCoverRaw && amount.lt(minDebtToCoverRaw)) return;
+  const key = amount.toString();
+  if (seen.has(key)) return;
+  seen.add(key);
+  options.push({
+    label,
+    amount,
+    display: ethers.utils.formatUnits(amount, debtDecimals),
+  });
+}
 
-async function attemptLiquidation({
-  user,
+function buildDebtToCoverOptions({ debtAmount, debtDecimals, healthFactor }) {
+  const options = [];
+  const seen = new Set();
+  let minDebtToCoverRaw = null;
+  try {
+    minDebtToCoverRaw = ethers.utils.parseUnits(process.env.MIN_DEBT_TO_COVER || "0.099", debtDecimals);
+  } catch (_) {
+    minDebtToCoverRaw = null;
+  }
+
+  const closeFactorThreshold = parseFloat(process.env.CLOSE_FACTOR_HF_THRESHOLD || "0.95");
+  if (Number.isFinite(healthFactor) && healthFactor > closeFactorThreshold) {
+    pushDebtToCoverOption(options, seen, "partial-50", debtAmount.div(2), debtDecimals, minDebtToCoverRaw);
+  }
+
+  // Aave v3-origin may reject a nominal 50% partial with MustNotLeaveDust. A
+  // near-full amount is still capped by Aave's close factor when full close is
+  // not allowed, but it lets small/dust-sensitive positions clear when allowed.
+  pushDebtToCoverOption(options, seen, "full+1wei", debtAmount.add(1), debtDecimals, minDebtToCoverRaw);
+  pushDebtToCoverOption(options, seen, "full", debtAmount, debtDecimals, minDebtToCoverRaw);
+  pushDebtToCoverOption(options, seen, "full+0.01pct", debtAmount.mul(10001).div(10000), debtDecimals, minDebtToCoverRaw);
+  pushDebtToCoverOption(options, seen, "partial-25", debtAmount.div(4), debtDecimals, minDebtToCoverRaw);
+  pushDebtToCoverOption(options, seen, "partial-10", debtAmount.div(10), debtDecimals, minDebtToCoverRaw);
+  pushDebtToCoverOption(options, seen, "partial-5", debtAmount.div(20), debtDecimals, minDebtToCoverRaw);
+
+  try {
+    pushDebtToCoverOption(options, seen, "one-unit", ethers.utils.parseUnits("1", debtDecimals), debtDecimals, minDebtToCoverRaw);
+  } catch (_) {
+    // Ignore unusual decimal metadata; the main raw-size options still apply.
+  }
+
+  return options;
+}
+
+async function selectLiquidationVariant({
+  contract,
   debtAsset,
   debtAmount,
-  debtDecimals = 6,
-  debtSymbol = "debt asset",
+  debtDecimals,
+  debtSymbol,
+  user,
   collateralAsset,
-  healthFactor
-}, {
+  provider,
+  chainConfig,
+  healthFactor,
+  gasPrice,
+  swapPath,
+  minProfitForCall,
+}) {
+  const options = buildDebtToCoverOptions({ debtAmount, debtDecimals, healthFactor });
+  const failures = [];
+
+  for (const option of options) {
+    const check = await simulateLiquidation(contract, {
+      debtAsset,
+      debtToCover: option.amount,
+      user,
+      collateralAsset,
+      provider,
+      chainConfig,
+      gasPrice,
+      swapPath,
+      minProfitForCall,
+    });
+    if (check.ok) {
+      return {
+        ok: true,
+        debtToCover: option.amount,
+        label: option.label,
+        display: `${option.display} ${debtSymbol}`,
+        check,
+        failures,
+      };
+    }
+    failures.push(`${option.label}:${check.reason}`);
+
+    // Keep trying the bounded ladder. Aave v3-origin dust checks, accrued
+    // interest, collateral exhaustion, and min-profit floors can each make a
+    // different size valid, so one failed over-cover should not hide exact full
+    // or a smaller partial that would pass.
+  }
+
+  return {
+    ok: false,
+    reason: failures[0] ? failures[0].split(":").slice(1).join(":") : "no precheck variants",
+    failures,
+  };
+}
+
+
+async function attemptLiquidation(position, {
   provider,
   chainConfig,
   aaveLiquidatorContract,
   nonceManager,
 }) {
+  const { user, healthFactor } = position;
+  const candidateBaskets = normalizeLiquidationBaskets(position);
+  const primaryBasket = candidateBaskets[0];
+  if (!primaryBasket) {
+    console.warn(`${chainConfig.name}: No liquidation basket available for ${user}; skipping.`);
+    return;
+  }
+
+  if (!testMode && isPrecheckCoolingDown(chainConfig.key, user)) {
+    if (process.env.VERBOSE_HEALTH_LOGS === "true") {
+      console.log(`⏳ ${chainConfig.name}: pre-check cooldown active for ${user}; skipping this trigger.`);
+    }
+    return;
+  }
+
   console.log("⚡ Attempting liquidation with:", {
     chain: chainConfig.name,
     user,
-    debtAsset,
-    debtAmount: ethers.utils.formatUnits(debtAmount, debtDecimals),
-    debtSymbol,
-    collateralAsset
+    debtAsset: primaryBasket.debtAsset,
+    debtAmount: ethers.utils.formatUnits(primaryBasket.debtAmount, primaryBasket.debtDecimals),
+    debtSymbol: primaryBasket.debtSymbol,
+    collateralAsset: primaryBasket.collateralAsset,
+    baskets: candidateBaskets.length,
   });
 
   // Use the health factor already measured by the sweep (passed through) instead
@@ -369,19 +594,6 @@ async function attemptLiquidation({
   if (latestHealthFactor > 1.0) {
     console.log(`⏳ Skipping ${user} (HF: ${latestHealthFactor}).`);
     return;
-  }
-
-  // Define a threshold for full vs. partial liquidation.
-  // For example, if HF is above 0.95, only 50% of the debt can be liquidated.
-  const CLOSE_FACTOR_HF_THRESHOLD = 0.95;
-  let debtToCover = debtAmount;
-
-  if (latestHealthFactor > CLOSE_FACTOR_HF_THRESHOLD) {
-    // Liquidate only 50% of the debt.
-    debtToCover = debtAmount.div(2); // BigNumber division (rounding down)
-    console.log(`Partial liquidation: Only covering 50% of the debt: ${ethers.utils.formatUnits(debtToCover, debtDecimals)} ${debtSymbol}`);
-  } else {
-    console.log(`Full liquidation: Covering full debt: ${ethers.utils.formatUnits(debtToCover, debtDecimals)} ${debtSymbol}`);
   }
 
   if (!aaveLiquidatorContract) {
@@ -421,18 +633,7 @@ async function attemptLiquidation({
     // leave null; helpers will fetch their own.
   }
 
-  // Resolve the V3 swap path off-chain (3.3) on path-aware chains, so both the
-  // callStatic gate and the broadcast can pass it in calldata (skips the
-  // contract's on-chain getPool fee-tier discovery). "0x" / failure ⇒ contract
-  // self-resolves, so this never regresses. Collateral==debt needs no swap.
-  let swapPath = "0x";
-  if (chainConfig.pathAware && collateralAsset.toLowerCase() !== debtAsset.toLowerCase()) {
-    try {
-      swapPath = await resolveSwapPath(provider, chainConfig, collateralAsset, debtAsset);
-    } catch (_) {
-      swapPath = "0x"; // fall back to on-chain resolution
-    }
-  }
+  const precheckGasPrice = sharedGasPrice || (await provider.getGasPrice());
 
   // PROFITABILITY PRE-CHECK (defense-in-depth, part 1 of 2).
   // Simulate the whole flash-loan → liquidationCall → swap → repay path with
@@ -441,39 +642,108 @@ async function attemptLiquidation({
   // or — once the hardened contract is deployed — the profit floor isn't met),
   // so we skip instead of burning gas on a guaranteed-failed tx. We also run
   // this in TEST_MODE purely for observability (would it have succeeded?).
-  const profitCheck = await simulateLiquidation(aaveLiquidatorContract, {
-    debtAsset,
-    debtToCover,
-    user,
-    collateralAsset,
-    provider,
-    chainConfig,
-    gasPrice: sharedGasPrice,
-    swapPath,
-  });
-  if (!profitCheck.ok) {
-    console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${profitCheck.reason}).`);
-    metrics.emit("attempt", {
-      chain: chainConfig.key, user, hf: latestHealthFactor,
-      outcome: "precheck_fail", reason: profitCheck.reason,
-      decideMs: metrics.since(decideT0), detectBlock,
-    });
-    return;
-  }
-  console.log(
-    `✅ ${chainConfig.name}: pre-check passed for ${user}` +
-      (profitCheck.estGasCostNative ? ` (est gas ~${profitCheck.estGasCostNative} ${chainConfig.nativeToken})` : "")
-  );
+  const basketFailures = [];
+  let selected = null;
+  const minDebtToCover = parseFloat(process.env.MIN_DEBT_TO_COVER || "0.099");
 
-  if (testMode) {
-    // Compute (but don't submit) the gas-aware floor for observability.
-    const previewFloor = await computeMinProfitUnits({
+  for (let i = 0; i < candidateBaskets.length; i++) {
+    const basket = candidateBaskets[i];
+    const {
+      debtAsset,
+      debtAmount,
+      debtDecimals,
+      debtSymbol,
+      collateralAsset,
+      basketLabel,
+    } = basket;
+    const debtInUnits = parseFloat(ethers.utils.formatUnits(debtAmount, debtDecimals));
+    if (debtInUnits < minDebtToCover) {
+      basketFailures.push(`${basketLabel}:debt below ${minDebtToCover}`);
+      continue;
+    }
+
+    // Resolve the V3 swap path off-chain (3.3) for this exact collateral→debt
+    // basket. "0x" / failure => contract self-resolves, so this never regresses.
+    let basketSwapPath = "0x";
+    if (chainConfig.pathAware && collateralAsset.toLowerCase() !== debtAsset.toLowerCase()) {
+      try {
+        basketSwapPath = await resolveSwapPath(provider, chainConfig, collateralAsset, debtAsset);
+      } catch (_) {
+        basketSwapPath = "0x";
+      }
+    }
+
+    const basketMinProfitUnits = await computeMinProfitUnits({
       provider,
       chainConfig,
       debtDecimals,
       estGasUnits: ethers.BigNumber.from(chainConfig.liquidationGasLimit),
-      gasPrice: sharedGasPrice || (await provider.getGasPrice()),
+      gasPrice: precheckGasPrice,
     });
+
+    const variant = await selectLiquidationVariant({
+      contract: aaveLiquidatorContract,
+      debtAsset,
+      debtAmount,
+      debtDecimals,
+      debtSymbol,
+      user,
+      collateralAsset,
+      provider,
+      chainConfig,
+      healthFactor: latestHealthFactor,
+      gasPrice: precheckGasPrice,
+      swapPath: basketSwapPath,
+      minProfitForCall: basketMinProfitUnits,
+    });
+
+    if (variant.ok) {
+      selected = {
+        ...basket,
+        swapPath: basketSwapPath,
+        minProfitUnits: basketMinProfitUnits,
+        variant,
+      };
+      break;
+    }
+
+    basketFailures.push(`${basketLabel}:${variant.reason}`);
+    console.log(`🧺 ${chainConfig.name}: basket ${i + 1}/${candidateBaskets.length} failed for ${user} (${basketLabel}: ${variant.reason}).`);
+  }
+
+  if (!selected) {
+    const reason = basketFailures[0] ? basketFailures[0].split(":").slice(1).join(":") : "no viable basket";
+    console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${reason}).`);
+    rememberPrecheckFailure(chainConfig.key, user);
+    metrics.emit("attempt", {
+      chain: chainConfig.key, user, hf: latestHealthFactor,
+      outcome: "precheck_fail", reason,
+      variants: basketFailures.join("|").slice(0, 1000),
+      decideMs: metrics.since(decideT0), detectBlock,
+    });
+    return;
+  }
+  clearPrecheckFailure(chainConfig.key, user);
+
+  const {
+    debtAsset,
+    debtAmount,
+    debtDecimals,
+    debtSymbol,
+    collateralAsset,
+    swapPath,
+    minProfitUnits,
+    variant,
+  } = selected;
+  const debtToCover = variant.debtToCover;
+  const profitCheck = variant.check;
+  console.log(
+    `✅ ${chainConfig.name}: pre-check passed for ${user} using ${selected.basketLabel}/${variant.label} (${variant.display})` +
+      (profitCheck.estGasCostNative ? ` (est gas ~${profitCheck.estGasCostNative} ${chainConfig.nativeToken})` : "")
+  );
+
+  if (testMode) {
+    const previewFloor = minProfitUnits;
     console.log("TEST_MODE enabled: pre-check passed but skipping submission.", {
       chain: chainConfig.name,
       user,
@@ -511,16 +781,6 @@ async function attemptLiquidation({
     // nothing beyond the failed-tx gas, and we never sell the bonus at a loss.
     // Cost the floor against the gas price we'd actually pay: the 1559 ceiling
     // (overrides.maxFeePerGas) or the legacy gasPrice, else the shared fetch.
-    const effGasPrice =
-      overrides.maxFeePerGas || overrides.gasPrice || sharedGasPrice || (await provider.getGasPrice());
-    const minProfitUnits = await computeMinProfitUnits({
-      provider,
-      chainConfig,
-      debtDecimals,
-      estGasUnits: ethers.BigNumber.from(chainConfig.liquidationGasLimit),
-      gasPrice: effGasPrice,
-    });
-
     // A function so we can pick the right entrypoint once and reuse it.
     const broadcast = () => {
       // Path-aware (3.3): pass the off-chain-resolved V3 path so the contract
@@ -530,12 +790,15 @@ async function attemptLiquidation({
       if (
         chainConfig.pathAware &&
         swapPath && swapPath !== "0x" &&
-        minProfitUnits &&
         aaveLiquidatorContract.triggerLiquidationWithPath
       ) {
-        console.log(`   ${chainConfig.name}: min-profit floor ${ethers.utils.formatUnits(minProfitUnits, debtDecimals)} ${debtSymbol} (path-in-calldata)`);
+        const floorForSend = minProfitUnits || ethers.constants.Zero;
+        const floorLabel = minProfitUnits
+          ? ethers.utils.formatUnits(minProfitUnits, debtDecimals)
+          : "contract-stored";
+        console.log(`   ${chainConfig.name}: min-profit floor ${floorLabel} ${debtSymbol} (path-in-calldata)`);
         return aaveLiquidatorContract.triggerLiquidationWithPath(
-          debtAsset, debtToCover, user, collateralAsset, minProfitUnits, swapPath, overrides
+          debtAsset, debtToCover, user, collateralAsset, floorForSend, swapPath, overrides
         );
       }
       if (chainConfig.hardenedLiquidator && minProfitUnits && aaveLiquidatorContract.triggerLiquidationWithMinProfit) {

@@ -1,6 +1,17 @@
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
 const { ethers } = require("ethers");
+
+const SMOKE_DATA_DIR = process.env.SMOKE_USE_REAL_STORE === "true"
+  ? null
+  : path.join("/tmp", `liq-smoke-${Date.now()}`);
+if (SMOKE_DATA_DIR) {
+  process.env.BORROWER_STORE_DIR = SMOKE_DATA_DIR;
+  process.env.BORROW_BACKFILL_FROM_DEPLOYMENT = "false";
+}
+
 const { getSelectedChainConfigs } = require("../src/chains");
 const { getGasSnapshot } = require("../src/gas");
 const { createProvider, getRpcUrls } = require("../src/provider");
@@ -14,18 +25,22 @@ const ADDRESSES_PROVIDER_ABI = ["function getPool() view returns (address)"];
 const TEST_WALLET_PRIVATE_KEY = process.env.PRIVATE_KEY || "";
 
 async function main() {
-  const chains = getSelectedChainConfigs(process.env.SMOKE_CHAINS || process.env.CHAINS);
-  const results = [];
+  try {
+    const chains = getSelectedChainConfigs(process.env.SMOKE_CHAINS || "arbitrum,base,avalanche,optimism");
+    const results = [];
 
-  for (const chainConfig of chains) {
-    results.push(await smokeChain(chainConfig));
-  }
+    for (const chainConfig of chains) {
+      results.push(await smokeChain(chainConfig));
+    }
 
-  console.log("Multi-chain smoke summary", JSON.stringify(results, null, 2));
+    console.log("Multi-chain smoke summary", JSON.stringify(results, null, 2));
 
-  const failed = results.filter((result) => !result.ok);
-  if (failed.length > 0) {
-    throw new Error(`Smoke failed on: ${failed.map((result) => result.chain).join(", ")}`);
+    const failed = results.filter((result) => !result.ok);
+    if (failed.length > 0) {
+      throw new Error(`Smoke failed on: ${failed.map((result) => result.chain).join(", ")}`);
+    }
+  } finally {
+    if (SMOKE_DATA_DIR) fs.rmSync(SMOKE_DATA_DIR, { recursive: true, force: true });
   }
 }
 
@@ -54,9 +69,14 @@ async function smokeChain(chainConfig) {
     }
 
     const reserves = await getReservesList(provider, chainConfig);
+    const smokeBlocks = parsePositiveInt(
+      process.env.SMOKE_BORROW_SCAN_BLOCKS,
+      Math.min(chainConfig.borrowScanBlocks || 60000, 60000)
+    );
     const borrowers = await getBorrowersFromBorrowEvents(provider, {
       ...chainConfig,
-      borrowScanBlocks: parsePositiveInt(process.env.SMOKE_BORROW_SCAN_BLOCKS, chainConfig.borrowScanBlocks),
+      borrowScanBlocks: smokeBlocks,
+      borrowBackfillBlocks: parsePositiveInt(process.env.SMOKE_BORROW_BACKFILL_BLOCKS, smokeBlocks),
     });
     const sampledBorrowers = borrowers.slice(0, 5);
     const healthFactors = [];

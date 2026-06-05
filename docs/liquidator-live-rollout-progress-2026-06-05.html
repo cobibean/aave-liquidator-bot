@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Liquidator Live Rollout Progress - 2026-06-05</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101315;
+      --panel: #171c20;
+      --text: #e8ecef;
+      --muted: #aab3ba;
+      --line: #2b343b;
+      --ok: #74d99f;
+      --warn: #f0c46b;
+      --bad: #ff8c7a;
+      --info: #8fc7ff;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px 56px;
+    }
+    h1, h2 {
+      line-height: 1.2;
+      margin: 0;
+    }
+    h1 {
+      font-size: 28px;
+      margin-bottom: 6px;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 26px 0 10px;
+    }
+    p {
+      margin: 0 0 10px;
+      color: var(--muted);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: #14191d;
+    }
+    code {
+      color: #dbe9ff;
+      background: #0d1114;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .status {
+      display: inline-block;
+      min-width: 72px;
+      font-weight: 700;
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .info { color: var(--info); }
+    .note {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 12px 14px;
+      margin-top: 10px;
+    }
+    ul {
+      margin-top: 8px;
+      padding-left: 22px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Liquidator Live Rollout Progress</h1>
+  <p>Run date: 2026-06-05. Workspace: <code>/Users/cobibean/Documents/liquidator(s()</code>. Droplet: <code>165.227.191.252</code>. No secrets recorded here.</p>
+
+  <h2>Current State</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Area</th>
+        <th>Status</th>
+        <th>Evidence / Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Code rollout</td>
+        <td><span class="status ok">Live</span></td>
+        <td>Four bot containers rebuilt and restarted from updated code. <code>TEST_MODE=false</code>, <code>ASYNC_SEND=true</code>, <code>MAX_INFLIGHT_TX=5</code>, <code>TRIGGER_ENRICH_CONCURRENCY=10</code>.</td>
+      </tr>
+      <tr>
+        <td>Hot trigger tier</td>
+        <td><span class="status ok">Live</span></td>
+        <td>Trigger scans now use <code>hot-&lt;chain&gt;.json</code>. Observed hot scans: Arbitrum 74 in 173ms, Base 234 in 479ms, Avalanche 83 in 570ms/222ms, Optimism 53 in 134ms.</td>
+      </tr>
+      <tr>
+        <td>Deep borrower backfill</td>
+        <td><span class="status ok">Complete</span></td>
+        <td>Optimism 12,251 -> 103,271; Avalanche 4,769 -> 64,377; Arbitrum 14,167 -> 185,040. Metadata is version 2 with deployment-floor source.</td>
+      </tr>
+      <tr>
+        <td>Forced post-merge COLD</td>
+        <td><span class="status ok">Complete</span></td>
+        <td>Optimism COLD swept 103,271; Avalanche COLD swept 64,377; Arbitrum COLD swept 185,040.</td>
+      </tr>
+      <tr>
+        <td>Liquidation attempt path</td>
+        <td><span class="status ok">Live gated</span></td>
+        <td>Arbitrum is unpaused on the correct V3-router contract. It detects 2 candidates, runs the expanded basket/size precheck, and skips without sending because Aave rejects the only exposed baskets with <code>MustNotLeaveDust</code>. Earlier real <code>sent</code> attempts were from a temporary stale V2-router contract address and reverted; that address has been removed from local and droplet runtime.</td>
+      </tr>
+      <tr>
+        <td>Remaining blocker</td>
+        <td><span class="status warn">No valid current basket</span></td>
+        <td>Coverage, hot speed, partial sizing, profit-floor parity, and basket iteration are live. The current Arbitrum candidates each expose one basket (<code>LUSD-&gt;WETH</code>, <code>EURS-&gt;WETH</code>) and that basket fails <code>callStatic</code>. The bot is ready to send when a hot target has a basket that passes Aave validation and the profit floor.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Live Chain Snapshot</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Chain</th>
+        <th>Borrowers</th>
+        <th>Active</th>
+        <th>Near</th>
+        <th>Watch</th>
+        <th>Hot</th>
+        <th>Last COLD Evidence</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Arbitrum</td>
+        <td>185,044</td>
+        <td>73,047</td>
+        <td>9,753</td>
+        <td>3,441</td>
+        <td>341</td>
+        <td><code>swept=9755</code>, <code>candidates=2</code>, precheck <code>MustNotLeaveDust</code>. Correct contract: <code>0x81f151E54B9578337f95bb84C821b96A73E98194</code>.</td>
+      </tr>
+      <tr>
+        <td>Avalanche</td>
+        <td>64,377</td>
+        <td>24,853</td>
+        <td>3,033</td>
+        <td>1,432</td>
+        <td>243</td>
+        <td><code>swept=64377</code>, <code>candidates=0</code>.</td>
+      </tr>
+      <tr>
+        <td>Optimism</td>
+        <td>103,271</td>
+        <td>44,805</td>
+        <td>1,606</td>
+        <td>844</td>
+        <td>313</td>
+        <td><code>swept=103271</code>, <code>candidates=0</code>.</td>
+      </tr>
+      <tr>
+        <td>Base</td>
+        <td>Already covered</td>
+        <td colspan="4">No deep backfill run per plan.</td>
+        <td>Hot trigger tier live.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Timeline</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Progress</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>2026-06-05 21:05 UTC</td>
+        <td>Backed up droplet <code>.env</code> and compose; synced code without <code>--delete</code>; preserved droplet-only <code>winscan-runner</code> compose service.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 21:06 UTC</td>
+        <td>Rebuilt/restarted bot containers. Verified live env knobs and <code>TEST_MODE=false</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 21:09 UTC</td>
+        <td>Started detached deep-backfill sidecars for Arbitrum, Avalanche, Optimism using checkpoint files under <code>/app/data/backfill</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 21:14 UTC</td>
+        <td>Added throttled <code>trigger_scan</code> metrics and rolled them out. Confirmed sub-second hot scans.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 21:36 UTC</td>
+        <td>Optimism backfill completed: 12,251 -> 103,271; forced COLD; full post-merge COLD later completed with <code>candidates=0</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 21:56 UTC</td>
+        <td>Avalanche backfill completed: 4,769 -> 64,377; full post-merge COLD completed with <code>candidates=0</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:06 UTC</td>
+        <td>Arbitrum full post-merge COLD completed: 185,040 swept, 2 candidates found. Prechecks currently fail with <code>MustNotLeaveDust()</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:20 UTC</td>
+        <td>Added liquidation-size ladder: <code>partial-50</code>, full-ish variants, smaller partials, and one-unit probes. Confirmed the partial-liquidation path was relevant: the original 50% partial was legal in concept but could still hit Aave dust validation.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:25 UTC</td>
+        <td>Discovered the local Arbitrum address was stale and pointed to an old V2-router deployment. Restored droplet Arbitrum contract to the correct V3-router deployment <code>0x81f151E54B9578337f95bb84C821b96A73E98194</code> and paused Arbitrum sends with a high min-debt override while patching precheck parity.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:28 UTC</td>
+        <td>Local precheck-floor parity patch is in progress: <code>callStatic</code> now uses the same path-aware function and gas-aware min-profit floor that the send path will use.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:39 UTC</td>
+        <td>Rolled out precheck-floor parity, basket iteration, <code>PRECHECK_FAIL_COOLDOWN_MS=30000</code>, <code>MAX_LIQUIDATION_BASKETS=8</code>, <code>ARBITRUM_WARM_SWEEP_SLICES=20</code>, and <code>COLD_MAX_AGE_MIN=240</code>. Verified all four active containers running with <code>TEST_MODE=false</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:43 UTC</td>
+        <td>Ran a controlled <code>TEST_MODE=true</code> sidecar full-active Arbitrum WARM to recover hot/near/watch after an interrupted COLD checkpoint. Result: <code>active=73046</code>, <code>near=9759</code>, <code>hot=332</code>, <code>candidates=2</code>.</td>
+      </tr>
+      <tr>
+        <td>2026-06-05 22:50 UTC</td>
+        <td>Live Arbitrum watchlist sweep rebuilt <code>hot=341</code> and found 2 candidates. Both prechecked through the expanded basket/size path and failed safely with <code>MustNotLeaveDust</code>; cooldown suppresses repeated expensive prechecks to roughly 30s.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Next Actions</h2>
+  <div class="note">
+    <ul>
+      <li>Continue watching for a hot candidate with a basket that passes Aave validation and min-profit; expected outcome is immediate <code>sent</code> then async confirmation.</li>
+      <li>If more real tx shots are desired despite current Aave rejections, the next decision is policy/risk: lower profit/dust constraints or change contract behavior, both outside the current safe-gated rollout.</li>
+      <li>Keep callStatic and profit gates on unless explicitly choosing to spend gas on likely reverts.</li>
+    </ul>
+  </div>
+</main>
+</body>
+</html>

@@ -4,7 +4,7 @@ A bot that monitors Aave positions across configured Aave V3 markets and execute
 
 ## Overview
 
-This bot continuously monitors Aave borrowers on configured networks, identifies positions that have fallen below the health factor threshold, and executes liquidations using flash loans. The default config targets high-TVL Aave V3 markets outside Ethereum mainnet and Linea: Plasma, Arbitrum, Base, Avalanche, and Optimism. Optional configs also exist for Ethereum, Linea, Polygon, and Metis.
+This bot continuously monitors Aave borrowers on configured networks, identifies positions that have fallen below the health factor threshold, and executes liquidations using flash loans. The live default config targets Arbitrum, Base, Avalanche, and Optimism. Optional configs also exist for Ethereum, Plasma, Linea, Polygon, and Metis.
 
 ## Features
 
@@ -14,12 +14,12 @@ This bot continuously monitors Aave borrowers on configured networks, identifies
   events — aged positions are the ones that actually get liquidated.)
 - **Stratified, batched health-factor sweep**: all health checks go through
   Multicall3 and stream batch-by-batch (flat memory even at Base's ~210k
-  borrowers). Three tiers by cost — a hot **watchlist** (near-threshold + non-dust)
-  every cycle, a **warm** sweep of the active-debt index periodically, and a
-  **cold** full sweep that rebuilds the index.
+  borrowers). Four tiers by cost — a tiny **hot** trigger tier, a broader
+  **watchlist/near** set every cycle, a **warm** sweep of the active-debt index
+  periodically, and a **cold** full sweep that rebuilds the index.
 - **Per-chain isolation**: each chain runs in its own container/process/heap.
-- **Optional per-block trigger**: re-check the watchlist every block (off by
-  default; enable with `BLOCK_TRIGGER=true` + WebSocket RPCs).
+- **Optional per-block trigger**: re-check the tiny hot tier every block (enable
+  with `BLOCK_TRIGGER=true` + WebSocket RPCs).
 - **Profitability gates**: callStatic pre-check + an on-chain gas-aware minProfit
   floor; EIP-1559 priority-fee bidding to win contested inclusion.
 - **Flash-loan liquidation**: minimal capital; collateral is swapped to repay.
@@ -86,7 +86,7 @@ Edit your `.env` file with the following parameters:
 
 ```
 # Chain Selection
-CHAINS=plasma,arbitrum,base,avalanche,optimism
+CHAINS=arbitrum,base,avalanche,optimism
 
 # Per-chain Liquidator Contracts
 PLASMA_AAVE_LIQUIDATOR_ADDRESS=0x...
@@ -173,14 +173,14 @@ pm2 logs aave-liquidator
 ```
 
 Production: run it with Docker Compose. Each chain runs in its OWN container
-(`bot-base`, `bot-arbitrum`, `bot-optimism`, `bot-avalanche`, `bot-plasma`) so
+(`bot-base`, `bot-arbitrum`, `bot-optimism`, `bot-avalanche`) so
 one chain's heavy sweep or OOM can't stall the others; they share the same
 `.env` and the same `liquidator-data` volume (stores are per-chain files).
 
 ```bash
 docker compose up -d --build
 docker compose logs -f bot-base          # one chain
-docker compose logs -f bot-base bot-arbitrum bot-optimism bot-avalanche bot-plasma  # all
+docker compose logs -f bot-base bot-arbitrum bot-optimism bot-avalanche  # all
 docker compose ps                        # see all chain containers + the monitor
 ```
 
@@ -201,10 +201,16 @@ The bot outputs detailed logs showing:
 The bot emits structured, greppable `key=value` metric lines so you can measure
 where liquidations are won/lost (Detect → Decide → Deliver) without a metrics
 server. Two record types:
-- `ev=sweep` — per HF sweep: `type`, `swept`, `sweepMs`, `candidates`, `watch`.
+- `ev=sweep` — per HF sweep: `type`, `swept`, `sweepMs`, `candidates`, `watch`,
+  `near`, and `hot`.
 - `ev=attempt` — per liquidation attempt: `outcome` (precheck_fail / testmode_ok /
   sent / mined / reverted / send_error / …), `decideMs`, `deliverMs`,
   `detectBlock`, `minedBlock`, `blockLag`, `prioGwei`.
+
+Large active-debt chains can slice WARM maintenance sweeps with
+`<CHAIN>_WARM_SWEEP_SLICES`; hot trigger scans still use `hot-<chain>.json`.
+Liquidation attempts try up to `MAX_LIQUIDATION_BASKETS` debt/collateral pairs
+and cool down repeated precheck failures with `PRECHECK_FAIL_COOLDOWN_MS`.
 
 ```bash
 docker logs bot-base 2>&1 | grep '📊 METRIC ev=attempt'   # the race timeline
@@ -222,20 +228,22 @@ docker exec bot-base node scripts/lossAttribution.js base   # per chain
 ### Private monitor dashboard
 
 This repo includes a small Express dashboard in `monitor/` for a human-readable
-operator view. It summarizes one bot container's logs (set by
-`MONITOR_BOT_CONTAINER`, defaults to `bot-base` — point it at another chain's
-container to watch that chain), liquidation activity, per-chain borrower
-progress (read from the shared data volume, so this covers all chains), and
-warnings. Raw logs are hidden on initial page load and are fetched only when the
-Raw logs controls are used.
+operator view. It summarizes the four per-chain bot containers
+(`bot-arbitrum`, `bot-base`, `bot-avalanche`, `bot-optimism`),
+combines recent fleet logs for liquidation activity, reads per-chain borrower
+progress from the shared data volume, and surfaces warnings. Raw logs are hidden
+on initial page load and are fetched only when the Raw logs controls are used.
 
 Security model:
 
 - The dashboard is designed for private Tailscale access only.
-- Docker Compose binds it to `127.0.0.1:8787` on the droplet by default.
+- The monitor process defaults to `HOST=0.0.0.0` and `PORT=3000` inside Docker.
+- Docker Compose publishes it only on loopback and `MONITOR_BIND_IP`, which
+  defaults to the droplet Tailscale IP `100.69.114.114`, so the direct private
+  URL is `http://100.69.114.114:3000`.
 - Do not expose it with public Tailscale Funnel or an unauthenticated public
   reverse proxy.
-- The monitor mounts `/var/run/docker.sock` to inspect the bot container and
+- The monitor mounts `/var/run/docker.sock` to inspect the bot containers and
   read Docker logs. Docker socket access is powerful host access even when the
   mount is marked read-only.
 - The Compose service runs the monitor container as root so it can read the
@@ -254,8 +262,10 @@ npm install --prefix monitor
 npm run monitor:start
 ```
 
-Open `http://127.0.0.1:8787`. If Docker or the bot container is unavailable, the
-monitor starts anyway and shows degraded or missing-container status.
+Open `http://127.0.0.1:3000` if you set `HOST=127.0.0.1`, or
+`http://localhost:3000` when using the default local bind. If Docker or the bot
+containers are unavailable, the monitor starts anyway and shows degraded or
+missing-container status.
 
 Run tests for the monitor:
 
@@ -263,22 +273,27 @@ Run tests for the monitor:
 npm run monitor:test
 ```
 
-Run on the droplet with Docker Compose:
+Run on the droplet with Docker Compose for direct Tailscale access:
 
 ```bash
 cd /opt/aave-liquidator-bot
-docker compose up -d --build liquidator-monitor
+HOST=0.0.0.0 PORT=3000 MONITOR_BIND_IP=100.69.114.114 docker compose up -d --build liquidator-monitor
 docker compose ps liquidator-monitor
-curl http://127.0.0.1:8787/api/health
-curl http://127.0.0.1:8787/api/status
+curl -I http://127.0.0.1:3000
+curl -I http://100.69.114.114:3000
 ```
 
-Expose privately with Tailscale Serve:
+Then browser-test the final private URL from another tailnet device:
 
-```bash
-tailscale serve --bg --https=443 127.0.0.1:8787
-tailscale serve status
-```
+`http://100.69.114.114:3000`
+
+Do not open a new public firewall port for the monitor. If running Compose on a
+machine that does not own `100.69.114.114`, set `MONITOR_BIND_IP` to that
+machine's Tailscale IP.
+
+Optional later nicer path: Tailscale Serve can front this dashboard as
+`https://<tailscale-magicdns-name>/`, but it is not required for direct tailnet
+viewing.
 
 Do not enable Tailscale Funnel for this service.
 

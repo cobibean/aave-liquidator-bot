@@ -1,6 +1,18 @@
 const { ethers } = require('ethers');
 const fetch = require("node-fetch");
-const { loadBorrowerSet, saveBorrowerSet, loadWatchlist, saveWatchlist, loadNear, saveNear, loadActiveDebt, saveActiveDebt } = require("./src/borrowerStore");
+const {
+  BACKFILL_VERSION,
+  loadBorrowerSet,
+  saveBorrowerSet,
+  loadWatchlist,
+  saveWatchlist,
+  loadNear,
+  saveNear,
+  loadHot,
+  saveHot,
+  loadActiveDebt,
+  saveActiveDebt,
+} = require("./src/borrowerStore");
 const { aggregate3InBatches, aggregate3Streaming } = require("./src/multicall");
 const metrics = require("./src/metrics");
 
@@ -44,6 +56,8 @@ function logVerbose(...args) {
     console.log(...args);
   }
 }
+
+const warnedStaleBackfill = new Set();
 
 // Runs `worker` over `items` with a bounded number of concurrent calls.
 // Used so health-factor checks across hundreds/thousands of borrowers happen
@@ -715,6 +729,33 @@ async function scanBorrowRange(pool, fromBlock, toBlock, chunkSize, target, labe
     return added;
 }
 
+function getBorrowBackfillPlan(currentBlock, chainConfig = {}) {
+    const fromDeployment = process.env.BORROW_BACKFILL_FROM_DEPLOYMENT !== "false";
+    const capDepth = chainConfig.borrowBackfillBlocks || chainConfig.borrowScanBlocks || 100000;
+    const windowFloor = Math.max(currentBlock - capDepth, 0);
+    const deploymentFloor = Number.isFinite(chainConfig.deploymentBlock)
+      ? Math.max(chainConfig.deploymentBlock, 0)
+      : null;
+    const floor = (fromDeployment && deploymentFloor !== null)
+      ? Math.max(deploymentFloor, windowFloor)
+      : windowFloor;
+    return {
+      floor,
+      source: fromDeployment && deploymentFloor !== null ? "deployment" : "window",
+      version: BACKFILL_VERSION,
+    };
+}
+
+function borrowerBackfillIsCurrent(state, plan) {
+    if (!state || !state.backfillDone) return false;
+    return (
+      Number.isFinite(state.backfillFloorBlock) &&
+      state.backfillFloorBlock <= plan.floor &&
+      state.backfillSource === plan.source &&
+      state.backfillVersion === plan.version
+    );
+}
+
 // Backfill-aware borrower discovery.
 //
 // The original implementation only scanned the last `borrowScanBlocks` of
@@ -736,21 +777,16 @@ async function getBorrowersFromBorrowEvents(provider, chainConfig = {}) {
 
     const state = loadBorrowerSet(chainKey);
     const { borrowers } = state;
+    const backfillPlan = getBorrowBackfillPlan(currentBlock, chainConfig);
 
     if (!state.backfillDone) {
       // DEEP BACKFILL (one-time, resumable). Floor is the pool deployment block
       // (captures ALL historical borrowers — the aged positions that actually
       // get liquidated), BUT never deeper than borrowBackfillBlocks, which acts
       // as a max-depth cap. On chains with very long histories + slow public RPCs
-      // (Avalanche/Optimism), a ~366-day cap finishes in minutes instead of ~30h
-      // while still covering every still-active borrower. Set
-      // BORROW_BACKFILL_FROM_DEPLOYMENT=false to ignore the deployment block entirely.
-      const fromDeployment = process.env.BORROW_BACKFILL_FROM_DEPLOYMENT !== "false";
-      const capDepth = chainConfig.borrowBackfillBlocks || chainConfig.borrowScanBlocks || 100000;
-      const windowFloor = Math.max(currentBlock - capDepth, 0);
-      const floor = (fromDeployment && Number.isFinite(chainConfig.deploymentBlock))
-        ? Math.max(chainConfig.deploymentBlock, windowFloor) // deployment, but capped to the window
-        : windowFloor;
+      // Set BORROW_BACKFILL_FROM_DEPLOYMENT=false to ignore the deployment block
+      // and use only the rolling max-depth window.
+      const floor = backfillPlan.floor;
 
       // Resume from where a prior interrupted backfill left off.
       const fromBlock = Number.isFinite(state.backfillCursor)
@@ -762,12 +798,34 @@ async function getBorrowersFromBorrowEvents(provider, chainConfig = {}) {
 
       const added = await scanBorrowRange(
         pool, fromBlock, currentBlock, chunkSize, borrowers, chainConfig.name || "Aave",
-        (checkpointBlock) => saveBorrowerSet(chainKey, borrowers, null, { backfillCursor: checkpointBlock, backfillDone: false })
+        (checkpointBlock) => saveBorrowerSet(chainKey, borrowers, null, {
+          backfillCursor: checkpointBlock,
+          backfillDone: false,
+          backfillFloorBlock: floor,
+          backfillSource: backfillPlan.source,
+          backfillVersion: backfillPlan.version,
+        })
       );
       // Backfill reached head: mark done and record head as the incremental anchor.
-      saveBorrowerSet(chainKey, borrowers, currentBlock, { backfillCursor: currentBlock, backfillDone: true });
+      saveBorrowerSet(chainKey, borrowers, currentBlock, {
+        backfillCursor: currentBlock,
+        backfillDone: true,
+        backfillFloorBlock: floor,
+        backfillSource: backfillPlan.source,
+        backfillVersion: backfillPlan.version,
+      });
       console.log(`✅ ${chainConfig.name}: BACKFILL complete — ${borrowers.size} known borrowers (+${added} new).`);
       return Array.from(borrowers);
+    }
+
+    if (!borrowerBackfillIsCurrent(state, backfillPlan) && !warnedStaleBackfill.has(chainKey)) {
+      warnedStaleBackfill.add(chainKey);
+      console.warn(
+        `⚠️ ${chainConfig.name}: borrower store metadata is stale or missing ` +
+        `(have floor=${state.backfillFloorBlock || "?"}, source=${state.backfillSource || "?"}, version=${state.backfillVersion || "?"}; ` +
+        `want floor<=${backfillPlan.floor}, source=${backfillPlan.source}, version=${backfillPlan.version}). ` +
+        `Run scripts/deepBackfillBorrowers.js ${chainKey} --from-deployment --merge --mark-cold-stale.`
+      );
     }
 
     // INCREMENTAL: backfill is done, only scan new blocks since last head.
@@ -779,7 +837,13 @@ async function getBorrowersFromBorrowEvents(provider, chainConfig = {}) {
 
     const newThisScan = new Set();
     const added = await scanBorrowRange(pool, fromBlock, currentBlock, chunkSize, borrowers, chainConfig.name || "Aave", null, newThisScan);
-    saveBorrowerSet(chainKey, borrowers, currentBlock, { backfillCursor: currentBlock, backfillDone: true });
+    saveBorrowerSet(chainKey, borrowers, currentBlock, {
+      backfillCursor: currentBlock,
+      backfillDone: true,
+      backfillFloorBlock: state.backfillFloorBlock,
+      backfillSource: state.backfillSource,
+      backfillVersion: state.backfillVersion,
+    });
 
     console.log(`✅ ${chainConfig.name}: ${borrowers.size} known borrowers (+${added} new this scan).`);
     // Expose the freshly-discovered addresses (as a property on the returned
@@ -1120,6 +1184,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     // slow full/warm sweep, and so could cross to liquidation unseen between them.
     // Per-chain overridable (<CHAIN>_NEAR_HF). Set ≤ watchlistHf to disable the tier.
     const nearHf = resolveChainNearHf(chainConfig, watchlistHf);
+    const triggerHf = resolveChainTriggerHf(chainConfig, threshold);
     const fullSweepEveryN = parseInt(process.env.FULL_SWEEP_EVERY_N || "8", 10);
     const coldSweepEveryN = parseInt(process.env.COLD_SWEEP_EVERY_N || "4", 10);
     // Time-based COLD floor (minutes). COLD is the ONLY sweep that promotes a
@@ -1168,6 +1233,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //     Borrow event we'd see incrementally.
     const { watch, cyclesSinceFullSweep } = loadWatchlist(chainKey);
     const { near } = loadNear(chainKey);
+    const { hot } = loadHot(chainKey);
     const { active, warmSweepsSinceCold, lastColdAt } = loadActiveDebt(chainKey);
 
     // On a watchlist/warm cycle, also include borrowers discovered THIS cycle by
@@ -1215,6 +1281,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
       const warmSet = new Set(warmSlice);
       for (const w of watch) warmSet.add(w);
       for (const n of near) warmSet.add(n);
+      for (const h of hot) warmSet.add(h);
       for (const b of newThisScan) warmSet.add(b);
       sweepSet = Array.from(warmSet);
     } else {
@@ -1225,7 +1292,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
       // it the cycle it crosses instead of waiting up to FULL_SWEEP_EVERY_N cycles.
       sweepSet = borrowers.filter((b) => {
         const key = b.toLowerCase();
-        return watch.has(key) || near.has(key) || newThisScan.has(key);
+        return watch.has(key) || near.has(key) || hot.has(key) || newThisScan.has(key);
       });
     }
     if (!doColdSweep && newThisScan.size > 0) {
@@ -1258,6 +1325,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     //                contested) below.
     const nextWatch = new Set();
     const nextNear = new Set(); // wider non-dust mid-tier (HF < nearHf), swept every cycle
+    const nextHot = new Set(); // tiny trigger tier (HF < triggerHf), swept every block/price update
     const candidates = [];
     let belowThreshold = 0;
     // Active-debt wallets observed THIS sweep (totalDebtUsd > 0). On a cold sweep
@@ -1293,6 +1361,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
           // also includes everything in the watchlist band). Anything non-dust
           // under nearHf is worth re-checking every cycle.
           if (healthFactor < nearHf) nextNear.add(key);
+          if (healthFactor < triggerHf) nextHot.add(key);
           // Fix 2: a freshly-discovered borrower with real debt enters the
           // every-cycle near tier regardless of HF, so a wallet that opens
           // healthy (e.g. HF 1.4) is still re-checked every cycle for its first
@@ -1316,7 +1385,8 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
                 lastCheckpointBatch = batchNum;
                 saveWatchlist(chainKey, nextWatch, fullSweepEveryN);
                 saveNear(chainKey, nextNear);
-                logVerbose(`   …${chainConfig.name}: ${sweepType} checkpoint ${sweptSoFar}/${sweepSet.length} (watch ${nextWatch.size}, near ${nextNear.size}, active ${nextActive.size}).`);
+                saveHot(chainKey, nextHot);
+                logVerbose(`   …${chainConfig.name}: ${sweepType} checkpoint ${sweptSoFar}/${sweepSet.length} (watch ${nextWatch.size}, near ${nextNear.size}, hot ${nextHot.size}, active ${nextActive.size}).`);
               }
             }
           : undefined,
@@ -1340,6 +1410,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     if (!setsEqual(nextNear, near)) {
       saveNear(chainKey, nextNear);
     }
+    saveHot(chainKey, nextHot);
 
     // Maintain the active-debt index. Only the COLD sweep — which reads every
     // borrower — can authoritatively DROP a wallet (it's the only sweep that can
@@ -1376,11 +1447,11 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
     // bot is also racing for.
     candidates.sort((a, b) => a.healthFactor - b.healthFactor);
 
-    console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}, near ${nextNear.size}.`);
+    console.log(`✅ ${chainConfig.name}: swept ${sweepSet.length} HFs in ${Date.now() - t0}ms; ${belowThreshold} below ${threshold}, ${candidates.length} above $${minDebtUsd} debt; watchlist now ${nextWatch.size}, near ${nextNear.size}, hot ${nextHot.size}.`);
     metrics.emit("sweep", {
       chain: chainConfig.key, type: sweepType, swept: sweepSet.length,
       sweepMs: Date.now() - t0, below: belowThreshold, candidates: candidates.length,
-      watch: nextWatch.size, near: nextNear.size,
+      watch: nextWatch.size, near: nextNear.size, hot: nextHot.size,
     });
 
     // Phase 2: enrich only the unhealthy, non-dust candidates (debt + collateral
@@ -1432,6 +1503,7 @@ async function getUnhealthyPositions(provider, chainConfig = {}) {
         debtDecimals,
         debtSymbol,
         collateralAsset,
+        liquidationBaskets: position.liquidationBaskets,
         healthFactor,
         totalDebtUsd,
       };
@@ -1494,12 +1566,17 @@ async function enrichCandidateBatched(user, provider, chainConfig, reserves) {
       if (debtPosition.debtAmount.lte(ethers.constants.Zero)) return null;
       const collateralAsset = await getPrimaryCollateral(user, provider, chainConfig);
       if (!collateralAsset) return null;
-      return {
+      const primary = {
         debtAsset: debtPosition.debtAsset,
         debtAmount: debtPosition.debtAmount,
         debtDecimals: debtPosition.debtDecimals,
         debtSymbol: debtPosition.debtSymbol,
         collateralAsset,
+        basketLabel: `${debtPosition.debtSymbol}->collateral`,
+      };
+      return {
+        ...primary,
+        liquidationBaskets: [primary],
       };
     }
 
@@ -1514,9 +1591,8 @@ async function enrichCandidateBatched(user, provider, chainConfig, reserves) {
     const raw = await aggregate3InBatches(provider, calls, batchSize);
 
     const preferredDebt = (chainConfig.debtAssetAddress || process.env.DEBT_ASSET_ADDRESS || "").toLowerCase();
-    let preferredDebtEntry = null; // { asset, debtAmount }
-    let bestDebtEntry = null; // largest non-preferred debt as fallback
-    let bestCollateral = null; // { asset, balance }
+    const debtEntries = [];
+    const collateralEntries = [];
 
     for (let i = 0; i < reserves.length; i++) {
       const asset = reserves[i];
@@ -1531,33 +1607,65 @@ async function enrichCandidateBatched(user, provider, chainConfig, reserves) {
 
       const debtAmount = decoded.currentStableDebt.add(decoded.currentVariableDebt);
       if (debtAmount.gt(ethers.constants.Zero)) {
-        if (asset.toLowerCase() === preferredDebt) {
-          preferredDebtEntry = { asset, debtAmount };
-        } else if (!bestDebtEntry || debtAmount.gt(bestDebtEntry.debtAmount)) {
-          bestDebtEntry = { asset, debtAmount };
-        }
+        debtEntries.push({
+          asset,
+          debtAmount,
+          preferred: preferredDebt && asset.toLowerCase() === preferredDebt,
+        });
       }
 
       if (
         decoded.currentATokenBalance.gt(ethers.constants.Zero) &&
-        decoded.usageAsCollateralEnabled &&
-        (!bestCollateral || decoded.currentATokenBalance.gt(bestCollateral.balance))
+        decoded.usageAsCollateralEnabled
       ) {
-        bestCollateral = { asset, balance: decoded.currentATokenBalance };
+        collateralEntries.push({ asset, balance: decoded.currentATokenBalance });
       }
     }
 
-    const chosenDebt = preferredDebtEntry || bestDebtEntry;
-    if (!chosenDebt) return null; // no positive debt
-    if (!bestCollateral) return null; // no valid collateral
+    if (debtEntries.length === 0) return null; // no positive debt
+    if (collateralEntries.length === 0) return null; // no valid collateral
 
-    const meta = await getAssetMetadataCached(chosenDebt.asset, provider, chainConfig);
+    const debtsWithMeta = await Promise.all(debtEntries.map(async (entry) => {
+      const meta = await getAssetMetadataCached(entry.asset, provider, chainConfig);
+      const debtInUnits = Number.parseFloat(ethers.utils.formatUnits(entry.debtAmount, meta.decimals));
+      return {
+        ...entry,
+        debtDecimals: meta.decimals,
+        debtSymbol: meta.symbol,
+        debtInUnits: Number.isFinite(debtInUnits) ? debtInUnits : 0,
+      };
+    }));
+
+    debtsWithMeta.sort((left, right) => {
+      if (left.preferred !== right.preferred) return left.preferred ? -1 : 1;
+      return right.debtInUnits - left.debtInUnits;
+    });
+    collateralEntries.sort((left, right) => {
+      if (left.balance.eq(right.balance)) return 0;
+      return left.balance.gt(right.balance) ? -1 : 1;
+    });
+
+    const maxBaskets = Math.max(1, parseInt(process.env.MAX_LIQUIDATION_BASKETS || "8", 10) || 8);
+    const baskets = [];
+    for (const debt of debtsWithMeta) {
+      for (const collateral of collateralEntries) {
+        baskets.push({
+          debtAsset: debt.asset,
+          debtAmount: debt.debtAmount,
+          debtDecimals: debt.debtDecimals,
+          debtSymbol: debt.debtSymbol,
+          collateralAsset: collateral.asset,
+          basketLabel: `${debt.debtSymbol}->${collateral.asset.slice(0, 8)}`,
+        });
+        if (baskets.length >= maxBaskets) break;
+      }
+      if (baskets.length >= maxBaskets) break;
+    }
+
+    const primary = baskets[0];
     return {
-      debtAsset: chosenDebt.asset,
-      debtAmount: chosenDebt.debtAmount,
-      debtDecimals: meta.decimals,
-      debtSymbol: meta.symbol,
-      collateralAsset: bestCollateral.asset,
+      ...primary,
+      liquidationBaskets: baskets,
     };
 }
 
@@ -1666,6 +1774,19 @@ function resolveChainNearHf(chainConfig = {}, watchlistHf = 1.25) {
       if (Number.isFinite(v) && v > 0) return Math.max(v, watchlistHf);
     }
     return Math.max(1.8, watchlistHf);
+}
+
+// Per-chain hot trigger ceiling: <CHAIN>_TRIGGER_HF → TRIGGER_HF → default 1.05.
+// Block/price triggers scan ONLY this tiny tier, so it should remain close to 1.
+function resolveChainTriggerHf(chainConfig = {}, threshold = 1.0) {
+    const key = (chainConfig.key || "").toUpperCase();
+    const candidates = [key ? process.env[`${key}_TRIGGER_HF`] : undefined, process.env.TRIGGER_HF, "1.05"];
+    for (const raw of candidates) {
+      if (raw === undefined || raw === null || raw === "") continue;
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v > 0) return Math.max(v, threshold);
+    }
+    return Math.max(1.05, threshold);
 }
 
 // Cheap Set equality (used to skip rewriting the near file when unchanged).
@@ -1790,7 +1911,11 @@ async function resolveSwapPath(provider, chainConfig, tokenIn, tokenOut) {
 }
 
   module.exports = {
+    BACKFILL_VERSION,
+    borrowerBackfillIsCurrent,
     getUnhealthyPositions,
+    getBorrowBackfillPlan,
+    mapWithConcurrency,
     resolveSwapPath,
     getUserHealthFactor,
     getUserHealthFactorsBatched,
@@ -1807,5 +1932,6 @@ async function resolveSwapPath(provider, chainConfig, tokenIn, tokenOut) {
     getPrimaryCollateral,
     enrichCandidateBatched,
     resolveChainMinDebtUsd,
+    resolveChainTriggerHf,
     // ...other exports as needed
   };
