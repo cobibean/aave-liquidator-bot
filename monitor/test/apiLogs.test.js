@@ -17,7 +17,7 @@ test("raw logs endpoint returns redacted logs only when requested", async () => 
     }),
   };
 
-  const app = createApp({ dockerClient });
+  const app = createApp({ dockerClient, containerNames: ["aave-liquidator"] });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
 

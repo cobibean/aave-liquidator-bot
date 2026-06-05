@@ -51,6 +51,15 @@
 
       <section class="section-head">
         <div>
+          <p class="eyebrow">Runtime fleet</p>
+          <h2>Chain containers</h2>
+        </div>
+        <span id="fleet-count" class="pill">5 expected</span>
+      </section>
+      <section id="containers" class="container-grid" aria-live="polite"></section>
+
+      <section class="section-head">
+        <div>
           <p class="eyebrow">Activity summary</p>
           <h2>Recent bot progress</h2>
         </div>
@@ -104,6 +113,144 @@
         </div>
       </section>
       <section id="warnings" class="warnings"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Win rate</p>
+          <h2>On-chain liquidations vs ours</h2>
+        </div>
+        <span id="winscan-status" class="pill">loading</span>
+      </section>
+      <section class="card winscan-card">
+        <div class="winscan-controls">
+          <button id="run-winscan" type="button">Run win scan now</button>
+          <button id="refresh-winscan" type="button">Refresh</button>
+          <span id="winscan-meta" class="muted">No scan loaded yet.</span>
+        </div>
+        <div class="winscan-totals">
+          <article class="mini-card">
+            <span>On-chain (window)</span>
+            <strong id="winscan-onchain">-</strong>
+          </article>
+          <article class="mini-card winscan-ours">
+            <span>OURS</span>
+            <strong id="winscan-ours">-</strong>
+          </article>
+        </div>
+        <div id="winscan-table" class="data-panel"></div>
+        <details class="raw-panel winscan-history-panel">
+          <summary><span>OURS over time</span><small>Recent scan history (per 30-min run).</small></summary>
+          <div id="winscan-history" class="data-panel"></div>
+        </details>
+      </section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Opportunity radar</p>
+          <h2>Where liquidation pressure is building</h2>
+        </div>
+        <span id="radar-total" class="pill">loading</span>
+      </section>
+      <section id="opportunity-radar" class="insight-grid radar-grid" aria-live="polite"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Race timeline</p>
+          <h2>Detect, decide, deliver</h2>
+        </div>
+        <span id="pipeline-total" class="pill">loading</span>
+      </section>
+      <section class="insight-grid two-col">
+        <article class="card">
+          <div class="card-label">Attempt outcomes</div>
+          <div id="pipeline-summary" class="summary-strip"></div>
+        </article>
+        <article class="card">
+          <div class="card-label">Latest attempt latencies</div>
+          <div id="pipeline-latencies" class="summary-strip"></div>
+        </article>
+      </section>
+      <section id="pipeline-table" class="data-panel" aria-live="polite"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Misses</p>
+          <h2>Failed, skipped, or unclaimed opportunities</h2>
+        </div>
+      </section>
+      <section id="missed-feed" class="data-panel"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Gas and profit</p>
+          <h2>Bid posture by chain</h2>
+        </div>
+      </section>
+      <section id="gas-panel" class="insight-grid"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Watchlist quality</p>
+          <h2>Hot-set coverage and freshness</h2>
+        </div>
+      </section>
+      <section id="watchlist-quality" class="insight-grid"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Chain SLA</p>
+          <h2>Runtime latency and freshness</h2>
+        </div>
+      </section>
+      <section id="chain-sla" class="insight-grid"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Event stream</p>
+          <h2>Latest bot signals</h2>
+        </div>
+      </section>
+      <section id="event-stream" class="data-panel"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Borrower detail</p>
+          <h2>Recently observed accounts</h2>
+        </div>
+      </section>
+      <section id="borrower-details" class="data-panel"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Router and preflight</p>
+          <h2>Contract readiness</h2>
+        </div>
+      </section>
+      <section id="router-health" class="insight-grid"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>Last 12 hours</h2>
+        </div>
+      </section>
+      <section id="history-panel" class="card history-panel"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Instrumentation</p>
+          <h2>Known blind spots</h2>
+        </div>
+      </section>
+      <section id="instrumentation-gaps" class="warnings"></section>
+
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Deployment</p>
+          <h2>Monitor runtime</h2>
+        </div>
+      </section>
+      <section id="deployment-panel" class="data-panel"></section>
 
       <details id="raw-logs-panel" class="raw-panel">
         <summary>

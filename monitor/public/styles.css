@@ -190,10 +190,63 @@ h2 {
   white-space: nowrap;
 }
 
+.pill-good {
+  border-color: color-mix(in srgb, var(--green), var(--line) 50%);
+  color: var(--green);
+}
+
+.pill-bad {
+  border-color: color-mix(in srgb, var(--red), var(--line) 50%);
+  color: var(--red);
+}
+
+.container-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.container-card {
+  min-width: 0;
+}
+
+.container-card h3 {
+  font-size: 1rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.container-top {
+  align-items: start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.container-facts {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(130px, 1fr));
   gap: 12px;
+}
+
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.radar-grid {
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+}
+
+.two-col {
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
 }
 
 .mini-card {
@@ -242,6 +295,10 @@ h2 {
   margin-top: 16px;
 }
 
+.chain-facts.compact {
+  gap: 8px 12px;
+}
+
 .fact {
   border-top: 1px solid var(--line);
   padding-top: 10px;
@@ -258,6 +315,210 @@ h2 {
   display: block;
   margin-top: 4px;
   overflow-wrap: anywhere;
+}
+
+.radar-bars {
+  display: grid;
+  gap: 11px;
+  margin-top: 16px;
+}
+
+.bar-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 112px minmax(80px, 1fr) 54px;
+}
+
+.bar-row span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.bar-row strong {
+  text-align: right;
+}
+
+.bar-track {
+  background: var(--panel-strong);
+  border-radius: 999px;
+  height: 9px;
+  overflow: hidden;
+}
+
+.bar-track div {
+  background: var(--muted);
+  border-radius: inherit;
+  height: 100%;
+}
+
+.bar-row.danger .bar-track div {
+  background: var(--red);
+}
+
+.bar-row.hot .bar-track div {
+  background: var(--yellow);
+}
+
+.bar-row.warm .bar-track div {
+  background: var(--blue);
+}
+
+.bar-row.cool .bar-track div {
+  background: var(--green);
+}
+
+.summary-strip {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(90px, 1fr));
+  margin-top: 14px;
+}
+
+.stat-chip {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.stat-chip span {
+  color: var(--muted);
+  display: block;
+  font-size: 0.82rem;
+}
+
+.stat-chip strong {
+  display: block;
+  font-size: 1.15rem;
+  margin-top: 3px;
+}
+
+.data-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  min-width: 720px;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 11px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+td {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.empty-panel,
+.panel-note {
+  padding: 16px 18px;
+}
+
+.history-panel {
+  padding: 18px;
+}
+
+.history-bars {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(12, minmax(18px, 1fr));
+  min-height: 190px;
+}
+
+.history-bucket {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-stack {
+  align-items: end;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  gap: 2px;
+  height: 150px;
+  justify-content: center;
+  padding: 5px;
+}
+
+.history-stack span {
+  border-radius: 4px 4px 0 0;
+  display: block;
+  min-height: 0;
+  width: 23%;
+}
+
+.history-stack .sweeps,
+.legend-sweeps {
+  background: var(--blue);
+}
+
+.history-stack .attempts,
+.legend-attempts {
+  background: var(--green);
+}
+
+.history-stack .failures,
+.legend-failures {
+  background: var(--red);
+}
+
+.history-bucket small {
+  color: var(--muted);
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.legend span {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 0.86rem;
+  gap: 6px;
+}
+
+.legend i {
+  border-radius: 3px;
+  display: inline-block;
+  height: 10px;
+  width: 10px;
 }
 
 .warnings {
@@ -357,6 +618,10 @@ h2 {
 
   .status-grid,
   .metrics-grid,
+  .container-grid,
+  .insight-grid,
+  .radar-grid,
+  .two-col,
   .chain-grid {
     grid-template-columns: 1fr;
   }
@@ -373,6 +638,51 @@ h2 {
   }
 
   .chain-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .history-bars {
+    gap: 6px;
+  }
+
+  .bar-row {
+    grid-template-columns: 96px minmax(70px, 1fr) 44px;
+  }
+}
+
+/* Win-rate scan panel */
+.winscan-card {
+  display: grid;
+  gap: 14px;
+}
+
+.winscan-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.winscan-totals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 220px));
+  gap: 12px;
+}
+
+.winscan-ours.winscan-won strong {
+  color: var(--green);
+}
+
+.winscan-history-panel {
+  margin-top: 0;
+}
+
+@media (max-width: 640px) {
+  .winscan-totals {
     grid-template-columns: 1fr;
   }
 }

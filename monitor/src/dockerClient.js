@@ -3,11 +3,32 @@ const http = require("http");
 const { redact } = require("./redact");
 
 const DEFAULT_SOCKET = "/var/run/docker.sock";
+const SAFE_ENV_KEYS = new Set([
+  "TEST_MODE",
+  "CHAINS",
+  "BLOCK_TRIGGER",
+  "ASYNC_SEND",
+  "MAX_INFLIGHT_TX",
+  "VERBOSE_HEALTH_LOGS",
+  "LIQUIDATION_THRESHOLD",
+  "MIN_DEBT_USD",
+  "WATCHLIST_HF",
+  "NEAR_HF",
+  "FULL_SWEEP_EVERY_N",
+  "COLD_SWEEP_EVERY_N",
+  "SCAN_INTERVAL_MS",
+  "PRIORITY_FEE_MULTIPLE",
+  "BASE_FEE_MULTIPLE",
+  "MIN_PRIORITY_FEE_GWEI",
+  "MAX_PRIORITY_FEE_GWEI",
+  "PROFIT_SAFETY_MULTIPLE",
+  "MIN_PROFIT_USD",
+]);
 
 class DockerClient {
   constructor({
     socketPath = process.env.DOCKER_SOCKET || DEFAULT_SOCKET,
-    containerName = process.env.MONITOR_BOT_CONTAINER || "aave-liquidator",
+    containerName = process.env.MONITOR_BOT_CONTAINER || "bot-base",
   } = {}) {
     this.socketPath = socketPath;
     this.containerName = containerName;
@@ -119,7 +140,7 @@ function normalizeInspect(body, fallbackName) {
     if (index === -1) continue;
     const key = entry.slice(0, index);
     const value = entry.slice(index + 1);
-    if (key === "TEST_MODE" || key === "CHAINS") {
+    if (SAFE_ENV_KEYS.has(key)) {
       env[key] = redact(value);
     }
   }

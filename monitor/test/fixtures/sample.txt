@@ -5,9 +5,15 @@
 2026-06-03T15:15:05.000000000Z Avalanche C-Chain: incremental Borrow scan 100 -> 200 (known borrowers: 523).
 2026-06-03T15:15:06.000000000Z Avalanche C-Chain: 523 known borrowers (+1 new this scan).
 2026-06-03T15:15:07.000000000Z Avalanche C-Chain: WARM HF sweep of 523 (known 523, active-debt 500, watch 3, cyclesSinceFull 20, warmSinceCold 2).
-2026-06-03T15:15:08.000000000Z Avalanche C-Chain: swept 523 HFs in 4100ms; 2 below 1, 2 above $10 debt; watchlist now 4.
+2026-06-03T15:15:08.000000000Z Avalanche C-Chain: swept 523 HFs in 4100ms; 2 below 1, 2 above $10 debt; watchlist now 4, near 7.
+2026-06-03T15:15:08.500000000Z 📊 METRIC ev=sweep chain=avalanche type=WARM swept=523 sweepMs=4100 below=2 candidates=2 watch=4 near=7
 2026-06-03T15:15:09.000000000Z Avalanche C-Chain: Found 2 liquidatable positions (cycle 4300ms).
+2026-06-03T15:15:09.500000000Z 👀 0x1111111111111111111111111111111111111111: HF 0.9845, ~$1234 total debt; primary 100.5 USDC
+2026-06-03T15:15:09.700000000Z 🔥 Found liquidatable position: 0x1111111111111111111111111111111111111111 | HF: 0.9845 | Debt: 100.5 USDC
 2026-06-03T15:15:10.000000000Z Attempting liquidation with:
+2026-06-03T15:15:10.500000000Z 📊 METRIC ev=attempt chain=avalanche user=0x1111111111111111111111111111111111111111 hf=0.9845 outcome=sent tx=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa nonce=7 decideMs=120 detectBlock=123 prioGwei=0.05
 2026-06-03T15:15:11.000000000Z TX sent: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-06-03T15:15:11.500000000Z 📊 METRIC ev=attempt chain=avalanche user=0x1111111111111111111111111111111111111111 hf=0.9845 outcome=mined tx=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa deliverMs=900 detectBlock=123 minedBlock=124 blockLag=1 gasUsed=123456
 2026-06-03T15:15:12.000000000Z Successful liquidation: 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-06-03T15:15:12.500000000Z 📊 METRIC ev=attempt chain=base user=0x2222222222222222222222222222222222222222 hf=0.99 outcome=precheck_fail reason=no_v3_path decideMs=33
 2026-06-03T15:15:13.000000000Z Arbitrum One: Error in main loop: RPC timeout token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN

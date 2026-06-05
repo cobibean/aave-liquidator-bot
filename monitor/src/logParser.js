@@ -1,4 +1,4 @@
-const { redact } = require("./redact");
+const { redact, redactObject } = require("./redact");
 
 const KNOWN_CHAINS = [
   { key: "plasma", name: "Plasma Mainnet", aliases: ["plasma"] },
@@ -12,12 +12,17 @@ const KNOWN_CHAINS = [
   { key: "metis", name: "Metis Andromeda", aliases: ["metis"] },
 ];
 
-function parseLogText(text, { now = new Date() } = {}) {
+function parseLogText(text, options = {}) {
+  const now = options.now || new Date();
   const result = {
     parsedAt: now.toISOString(),
     lastLogAt: null,
     inferredChains: [],
     chains: {},
+    metrics: {
+      sweeps: [],
+      attempts: [],
+    },
     activity: {
       liquidatableDetections: 0,
       liquidationAttempts: 0,
@@ -27,12 +32,14 @@ function parseLogText(text, { now = new Date() } = {}) {
       mainLoopErrors: 0,
       newestNotableEvent: null,
     },
+    borrowers: [],
     events: [],
   };
 
   const lines = String(text || "").split(/\r?\n/).filter((line) => line.trim() !== "");
   let cycleLiquidatableTotal = 0;
   let flameLiquidatableCount = 0;
+  const defaultChain = findChain(options.defaultChainKey || "");
 
   for (const rawLine of lines) {
     const { at, message } = splitDockerTimestamp(redact(rawLine));
@@ -42,15 +49,33 @@ function parseLogText(text, { now = new Date() } = {}) {
 
     parseStartingLine(message, result);
 
-    const chain = findChain(message);
+    const chain = findChain(message) || defaultChain;
     if (chain) {
       ensureChain(result, chain);
       parseChainLine(message, at, chain, result);
     }
 
+    parseMetricLine(message, at, chain, result);
+    parseCandidateLine(message, at, chain, result);
+
     if (/Found liquidatable position:/i.test(message)) {
       flameLiquidatableCount += 1;
-      addEvent(result, { at, type: "liquidatable", chain: chain?.key || null, message: "Liquidatable position found" });
+      const detail = parseLiquidatableLine(message);
+      if (detail) {
+        result.borrowers.push({
+          at,
+          chain: chain?.key || null,
+          stage: "liquidatable",
+          ...detail,
+        });
+      }
+      addEvent(result, {
+        at,
+        type: "liquidatable",
+        chain: chain?.key || null,
+        message: detail?.user ? `Liquidatable position found: ${shortAddress(detail.user)}` : "Liquidatable position found",
+        details: detail,
+      });
     }
 
     const cycleMatch = message.match(/Found\s+(\d+)\s+liquidatable positions(?:\s+\(cycle\s+(\d+)ms\))?/i);
@@ -140,7 +165,7 @@ function parseChainLine(message, at, chain, result) {
     };
   }
 
-  const sweepDone = message.match(/swept\s+(\d+)\s+HFs in\s+(\d+)ms;\s+(\d+)\s+below\s+([0-9.]+),\s+(\d+)\s+above\s+\$?([0-9.]+)\s+debt;\s+watchlist now\s+(\d+)/i);
+  const sweepDone = message.match(/swept\s+(\d+)\s+HFs in\s+(\d+)ms;\s+(\d+)\s+below\s+([0-9.]+),\s+(\d+)\s+above\s+\$?([0-9.]+)\s+debt;\s+watchlist now\s+(\d+)(?:,\s+near\s+(\d+))?/i);
   if (sweepDone) {
     state.latestSweep = {
       ...(state.latestSweep || {}),
@@ -151,6 +176,7 @@ function parseChainLine(message, at, chain, result) {
       candidatesAboveDebt: Number.parseInt(sweepDone[5], 10),
       minDebtUsd: Number.parseFloat(sweepDone[6]),
       watchlistCount: Number.parseInt(sweepDone[7], 10),
+      nearCount: sweepDone[8] ? Number.parseInt(sweepDone[8], 10) : state.latestSweep?.nearCount ?? null,
       at,
     };
   }
@@ -182,6 +208,189 @@ function parseChainLine(message, at, chain, result) {
       summary: summarizeMessage(message),
     };
   }
+}
+
+function parseMetricLine(message, at, chain, result) {
+  const marker = "📊 METRIC ";
+  const index = message.indexOf(marker);
+  if (index === -1) return;
+
+  const fields = parseMetricFields(message.slice(index + marker.length));
+  const ev = fields.ev;
+  if (!ev) return;
+
+  const record = {
+    at,
+    chain: fields.chain || chain?.key || null,
+    ...fields,
+  };
+  delete record.ev;
+  normalizeMetricNumbers(record);
+
+  if (ev === "sweep") {
+    result.metrics.sweeps.push(record);
+    const metricChain = record.chain ? findChain(record.chain) : chain;
+    if (metricChain) {
+      const state = ensureChain(result, metricChain);
+      state.latestSweep = {
+        ...(state.latestSweep || {}),
+        type: record.type || state.latestSweep?.type || null,
+        sweepCount: record.swept ?? state.latestSweep?.sweepCount ?? null,
+        durationMs: record.sweepMs ?? state.latestSweep?.durationMs ?? null,
+        belowThreshold: record.below ?? state.latestSweep?.belowThreshold ?? null,
+        candidatesAboveDebt: record.candidates ?? state.latestSweep?.candidatesAboveDebt ?? null,
+        watchlistCount: record.watch ?? state.latestSweep?.watchlistCount ?? null,
+        nearCount: record.near ?? state.latestSweep?.nearCount ?? null,
+        at,
+      };
+    }
+    addEvent(result, {
+      at,
+      type: "sweep",
+      chain: record.chain,
+      message: `${record.type || "sweep"} swept ${numberText(record.swept)} users in ${numberText(record.sweepMs)}ms`,
+      details: record,
+    });
+    return;
+  }
+
+  if (ev === "attempt") {
+    result.metrics.attempts.push(record);
+    addEvent(result, {
+      at,
+      type: `attempt_${record.outcome || "unknown"}`,
+      chain: record.chain,
+      message: attemptMessage(record),
+      details: record,
+    });
+  }
+}
+
+function parseMetricFields(text) {
+  const fields = {};
+  for (const part of String(text || "").trim().split(/\s+/)) {
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    const key = part.slice(0, index);
+    const value = part.slice(index + 1);
+    fields[key] = redact(value);
+  }
+  return fields;
+}
+
+function normalizeMetricNumbers(record) {
+  const numericKeys = [
+    "swept",
+    "sweepMs",
+    "below",
+    "candidates",
+    "watch",
+    "near",
+    "hf",
+    "decideMs",
+    "deliverMs",
+    "detectBlock",
+    "minedBlock",
+    "blockLag",
+    "gasUsed",
+    "nonce",
+    "prioGwei",
+    "estGasNative",
+  ];
+
+  for (const key of numericKeys) {
+    if (record[key] === undefined) continue;
+    const value = Number(record[key]);
+    if (Number.isFinite(value)) record[key] = value;
+  }
+}
+
+function parseCandidateLine(message, at, chain, result) {
+  const candidate = message.match(/👀\s+(0x[a-fA-F0-9]{40}):\s+HF\s+([0-9.]+),\s+~\$([0-9.]+)\s+total debt;\s+primary\s+([0-9.]+)\s+([A-Za-z0-9._-]+)/);
+  if (candidate) {
+    const detail = {
+      user: candidate[1],
+      healthFactor: Number.parseFloat(candidate[2]),
+      totalDebtUsd: Number.parseFloat(candidate[3]),
+      primaryDebt: Number.parseFloat(candidate[4]),
+      debtSymbol: candidate[5],
+    };
+    result.borrowers.push({
+      at,
+      chain: chain?.key || null,
+      stage: "candidate",
+      ...detail,
+    });
+    addEvent(result, {
+      at,
+      type: "candidate",
+      chain: chain?.key || null,
+      message: `${shortAddress(detail.user)} HF ${detail.healthFactor.toFixed(4)} debt ~$${Math.round(detail.totalDebtUsd)}`,
+      details: detail,
+    });
+    return;
+  }
+
+  const health = message.match(/Health factor for\s+(0x[a-fA-F0-9]{40}):\s+([0-9.]+)/i);
+  if (health) {
+    result.borrowers.push({
+      at,
+      chain: chain?.key || null,
+      stage: "health_check",
+      user: health[1],
+      healthFactor: Number.parseFloat(health[2]),
+    });
+  }
+
+  const precheckFailed = message.match(/pre-check failed for\s+(0x[a-fA-F0-9]{40}).*?skipping\s+\((.+)\)/i);
+  if (precheckFailed) {
+    addEvent(result, {
+      at,
+      type: "precheck_failed",
+      chain: chain?.key || null,
+      message: `${shortAddress(precheckFailed[1])} pre-check failed`,
+      details: {
+        user: precheckFailed[1],
+        reason: summarizeMessage(precheckFailed[2]),
+      },
+    });
+  }
+
+  const precheckPassed = message.match(/pre-check passed for\s+(0x[a-fA-F0-9]{40})/i);
+  if (precheckPassed) {
+    addEvent(result, {
+      at,
+      type: "precheck_passed",
+      chain: chain?.key || null,
+      message: `${shortAddress(precheckPassed[1])} pre-check passed`,
+      details: { user: precheckPassed[1] },
+    });
+  }
+
+  const floor = message.match(/min-profit floor\s+([0-9.]+)\s+([A-Za-z0-9._-]+)/i);
+  if (floor) {
+    addEvent(result, {
+      at,
+      type: "min_profit_floor",
+      chain: chain?.key || null,
+      message: `Min-profit floor ${floor[1]} ${floor[2]}`,
+      details: {
+        amount: Number.parseFloat(floor[1]),
+        symbol: floor[2],
+      },
+    });
+  }
+}
+
+function parseLiquidatableLine(message) {
+  const match = message.match(/Found liquidatable position:\s+(0x[a-fA-F0-9]{40})\s+\|\s+HF:\s+([0-9.]+)\s+\|\s+Debt:\s+([0-9.]+)\s+([A-Za-z0-9._-]+)/i);
+  if (!match) return null;
+  return {
+    user: match[1],
+    healthFactor: Number.parseFloat(match[2]),
+    primaryDebt: Number.parseFloat(match[3]),
+    debtSymbol: match[4],
+  };
 }
 
 function ensureChain(result, chain) {
@@ -228,7 +437,30 @@ function addEvent(result, event) {
     type: event.type,
     chain: event.chain,
     message: redact(event.message),
+    details: redactObject(event.details || null),
   });
+}
+
+function attemptMessage(record) {
+  const user = record.user ? `${shortAddress(record.user)} ` : "";
+  const outcome = record.outcome || "unknown";
+  if (record.tx) return `${user}${outcome} ${shortHash(record.tx)}`;
+  if (record.reason) return `${user}${outcome}: ${summarizeMessage(record.reason)}`;
+  return `${user}${outcome}`;
+}
+
+function shortAddress(value) {
+  const text = String(value || "");
+  return text.length > 12 ? `${text.slice(0, 6)}...${text.slice(-4)}` : text;
+}
+
+function shortHash(value) {
+  const text = String(value || "");
+  return text.length > 14 ? `${text.slice(0, 8)}...${text.slice(-6)}` : text;
+}
+
+function numberText(value) {
+  return Number.isFinite(value) ? String(value) : "-";
 }
 
 function newestEvent(events) {

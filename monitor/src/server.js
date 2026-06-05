@@ -22,6 +22,16 @@ function createApp(options = {}) {
     res.status(status.ok ? 200 : 207).json(status);
   });
 
+  app.get("/api/winscan", (_req, res) => {
+    const result = service.getWinScan();
+    res.status(result.ok ? 200 : 207).json(result);
+  });
+
+  app.post("/api/winscan/run", (_req, res) => {
+    const result = service.requestWinScan();
+    res.status(result.ok ? 202 : 503).json(result);
+  });
+
   app.get("/api/logs", async (req, res) => {
     const sinceMs = parseSince(req.query.since || "1h", "1h", "24h");
     const limit = clampInt(req.query.limit, {
@@ -47,9 +57,24 @@ function createApp(options = {}) {
   return app;
 }
 
+function resolveListenConfig(env = process.env) {
+  return {
+    host: firstEnv(env.HOST, env.MONITOR_HOST) || "0.0.0.0",
+    port: parsePort(firstEnv(env.PORT, env.MONITOR_PORT), 3000),
+  };
+}
+
+function firstEnv(...values) {
+  return values.find((value) => typeof value === "string" && value.trim() !== "");
+}
+
+function parsePort(value, fallback) {
+  const port = Number.parseInt(value, 10);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
 if (require.main === module) {
-  const host = process.env.MONITOR_HOST || "127.0.0.1";
-  const port = Number.parseInt(process.env.MONITOR_PORT || "8787", 10);
+  const { host, port } = resolveListenConfig();
   const app = createApp();
 
   app.listen(port, host, () => {
@@ -59,4 +84,5 @@ if (require.main === module) {
 
 module.exports = {
   createApp,
+  resolveListenConfig,
 };
