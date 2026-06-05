@@ -1,5 +1,12 @@
 # Liquidator Situation Report - 2026-06-03
 
+> **⚠️ OLD REPORT — read `docs/liquidator-situation-report-2026-06-05.md` instead.**
+> This 2026-06-03 brief is two major iterations behind. Most "current behavior"
+> issues here (OOM crash-loop, empty watchlists, single-process contention, swap-router
+> V2/V3 mismatch) are FIXED. The current open question (does the bot actually detect +
+> attempt live at-risk whales, or is Base just fully contested?) is covered only in the
+> 2026-06-05 report. Kept for historical context.
+
 Audience: Opus or another senior agent taking over strategy for today's Aave
 liquidator updates.
 
