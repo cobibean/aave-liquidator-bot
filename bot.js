@@ -51,6 +51,13 @@ const oraclePriceCache = new Map(); // `${chainKey}:${asset}` -> { price, fetche
 const ORACLE_PRICE_TTL_MS = parseInt(process.env.ORACLE_PRICE_TTL_MS || "5000", 10);
 const lastTriggerScanLogAt = new Map();
 const precheckFailureUntil = new Map();
+// Users whose precheck failed with MustNotLeaveDust while HF was still above
+// Aave's full-close threshold (the "dead zone"): a partial leaves dust and a
+// full close isn't permitted yet, so NOBODY can liquidate them until HF drops
+// below the threshold. We park them on a long (structural) backoff and re-arm
+// them the instant a fresh sweep HF crosses below the threshold. Map value is
+// the HF we last saw them armed at (for logging / debugging only).
+const precheckArmedDeadzone = new Map();
 
 function shouldLogTriggerScan(chainKey, foundLiquidatable) {
   if (foundLiquidatable) return true;
@@ -63,8 +70,19 @@ function shouldLogTriggerScan(chainKey, foundLiquidatable) {
   return true;
 }
 
-function precheckCooldownMs() {
-  const value = parseInt(process.env.PRECHECK_FAIL_COOLDOWN_MS || "30000", 10);
+// Backoff after a precheck fail. TRANSIENT (price wobble, momentary heal,
+// profit-floor miss) may flip to winnable on the very next sweep, so it gets a
+// short window. STRUCTURAL fails (healthy HF, zero debt, dust dead zone) cannot
+// become winnable without a material on-chain state change, so re-simulating
+// them every 30s just burns CPU + RPC — they get a long window instead. This is
+// the fix for the overnight spin (1,433/1,856 precheck_fails were one of three
+// structurally-doomed positions retried every 30s).
+function precheckCooldownMs(kind) {
+  const envName = kind === "structural"
+    ? "PRECHECK_STRUCTURAL_COOLDOWN_MS"
+    : "PRECHECK_FAIL_COOLDOWN_MS";
+  const fallback = kind === "structural" ? "1800000" : "30000"; // 30min vs 30s
+  const value = parseInt(process.env[envName] || fallback, 10);
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
@@ -78,13 +96,42 @@ function isPrecheckCoolingDown(chainKey, user) {
   return true;
 }
 
-function rememberPrecheckFailure(chainKey, user) {
-  const ms = precheckCooldownMs();
+function rememberPrecheckFailure(chainKey, user, kind = "transient") {
+  const ms = precheckCooldownMs(kind);
   if (ms > 0) precheckFailureUntil.set(precheckCooldownKey(chainKey, user), Date.now() + ms);
 }
 
 function clearPrecheckFailure(chainKey, user) {
-  precheckFailureUntil.delete(precheckCooldownKey(chainKey, user));
+  const key = precheckCooldownKey(chainKey, user);
+  precheckFailureUntil.delete(key);
+  precheckArmedDeadzone.delete(key);
+}
+
+// Classify a precheck failure so we can pick the right backoff. STRUCTURAL =
+// cannot win without a state change (healthy, no debt, or dust dead zone).
+// Everything else is TRANSIENT. `hf` is the sweep-measured health factor.
+function classifyPrecheckFailure(reason, hf) {
+  const r = String(reason || "").toLowerCase();
+  // Healed / never was unhealthy.
+  if (Number.isFinite(hf) && hf > 1.0) return "structural";
+  if (r.includes("healthfactornotbelowthreshold")) return "structural";
+  // Nothing to liquidate.
+  if (r.includes("no collateral received") || r.includes("debt below")) return "structural";
+  // Dust dead zone: a partial leaves dust and full-close isn't allowed until HF
+  // crosses the close-factor threshold. Unwinnable by anyone until then.
+  if (r.includes("mustnotleavedust") && Number.isFinite(hf) && hf > closeFactorHfThreshold()) {
+    return "structural";
+  }
+  return "transient";
+}
+
+// Aave's full-close (100%) health-factor threshold. Below it a single
+// liquidationCall may take the entire debt (bypassing the dust check); above
+// it Aave caps a call at the 50% default close factor. Reuse the same env that
+// drives the partial-vs-full ladder decision so they never disagree.
+function closeFactorHfThreshold() {
+  const v = parseFloat(process.env.CLOSE_FACTOR_HF_THRESHOLD || "0.95");
+  return Number.isFinite(v) ? v : 0.95;
 }
 
 function normalizeLiquidationBaskets(position) {
@@ -469,7 +516,7 @@ function buildDebtToCoverOptions({ debtAmount, debtDecimals, healthFactor }) {
     minDebtToCoverRaw = null;
   }
 
-  const closeFactorThreshold = parseFloat(process.env.CLOSE_FACTOR_HF_THRESHOLD || "0.95");
+  const closeFactorThreshold = closeFactorHfThreshold();
   if (Number.isFinite(healthFactor) && healthFactor > closeFactorThreshold) {
     pushDebtToCoverOption(options, seen, "partial-50", debtAmount.div(2), debtDecimals, minDebtToCoverRaw);
   }
@@ -564,10 +611,28 @@ async function attemptLiquidation(position, {
   }
 
   if (!testMode && isPrecheckCoolingDown(chainConfig.key, user)) {
-    if (process.env.VERBOSE_HEALTH_LOGS === "true") {
-      console.log(`⏳ ${chainConfig.name}: pre-check cooldown active for ${user}; skipping this trigger.`);
+    // Dead-zone re-arm: a position parked on the structural backoff because it
+    // was dust-locked above the close-factor threshold becomes winnable the
+    // instant its HF crosses below that threshold (Aave then allows a full
+    // close, bypassing the dust check). The sweep already re-measured HF for us
+    // (no extra RPC), so if a previously-armed user has now crossed, clear the
+    // cooldown and fall through to a fresh precheck immediately.
+    const cdKey = precheckCooldownKey(chainConfig.key, user);
+    const crossed =
+      precheckArmedDeadzone.has(cdKey) &&
+      Number.isFinite(healthFactor) &&
+      healthFactor < closeFactorHfThreshold();
+    if (crossed) {
+      console.log(
+        `🎯 ${chainConfig.name}: armed dead-zone ${user} crossed HF ${healthFactor.toFixed(4)} < ${closeFactorHfThreshold()} — re-arming for full close.`
+      );
+      clearPrecheckFailure(chainConfig.key, user);
+    } else {
+      if (process.env.VERBOSE_HEALTH_LOGS === "true") {
+        console.log(`⏳ ${chainConfig.name}: pre-check cooldown active for ${user}; skipping this trigger.`);
+      }
+      return;
     }
-    return;
   }
 
   console.log("⚡ Attempting liquidation with:", {
@@ -713,11 +778,29 @@ async function attemptLiquidation(position, {
 
   if (!selected) {
     const reason = basketFailures[0] ? basketFailures[0].split(":").slice(1).join(":") : "no viable basket";
-    console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${reason}).`);
-    rememberPrecheckFailure(chainConfig.key, user);
+    const kind = classifyPrecheckFailure(reason, latestHealthFactor);
+    // Arm dust dead-zone positions: genuinely liquidatable (HF < 1) but blocked
+    // by MustNotLeaveDust while still above the close-factor threshold. Tag them
+    // so the cooldown gate re-fires the instant their HF crosses below it.
+    const dustDeadzone =
+      kind === "structural" &&
+      String(reason).toLowerCase().includes("mustnotleavedust") &&
+      Number.isFinite(latestHealthFactor) &&
+      latestHealthFactor < 1.0 &&
+      latestHealthFactor > closeFactorHfThreshold();
+    const cdKey = precheckCooldownKey(chainConfig.key, user);
+    if (dustDeadzone) {
+      precheckArmedDeadzone.set(cdKey, latestHealthFactor);
+      console.log(
+        `🪤 ${chainConfig.name}: armed dead-zone ${user} (HF ${latestHealthFactor.toFixed(4)} > ${closeFactorHfThreshold()}, dust-locked) — backing off until it crosses.`
+      );
+    }
+    console.log(`🛑 ${chainConfig.name}: pre-check failed for ${user} — skipping (${reason}) [${kind}].`);
+    rememberPrecheckFailure(chainConfig.key, user, kind);
     metrics.emit("attempt", {
       chain: chainConfig.key, user, hf: latestHealthFactor,
-      outcome: "precheck_fail", reason,
+      outcome: "precheck_fail", reason, failKind: kind,
+      armedDeadzone: dustDeadzone || undefined,
       variants: basketFailures.join("|").slice(0, 1000),
       decideMs: metrics.since(decideT0), detectBlock,
     });
@@ -867,9 +950,15 @@ async function attemptLiquidation(position, {
             gasUsed: receipt.gasUsed && receipt.gasUsed.toString(),
           });
         } else {
-          console.warn(`⚠️ Liquidation TX failed on-chain: ${tx.hash}`);
+          // We only reach the send path after a passing callStatic precheck, so
+          // an on-chain revert here is a precheck→mine staleness loss (position
+          // healed / state moved in the ~block between sim and inclusion), NOT a
+          // bad gate. Tag it so the staleness rate is greppable; per the Issue-2
+          // decision we accept these rather than re-simming before broadcast.
+          console.warn(`⚠️ Liquidation TX reverted on-chain (precheck-pass staleness): ${tx.hash}`);
           metrics.emit("attempt", {
             chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "reverted",
+            staleness: true, afterPrecheckPass: true,
             tx: tx.hash, deliverMs, detectBlock, minedBlock: receipt.blockNumber,
           });
         }
@@ -880,8 +969,12 @@ async function attemptLiquidation(position, {
           console.warn(`⚠️ Transaction was replaced: ${waitErr.replacement && waitErr.replacement.hash}`);
           metrics.emit("attempt", { chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "replaced", tx: tx.hash, deliverMs, detectBlock });
         } else {
+          // A CALL_EXCEPTION here is the ethers wrapper around the same on-chain
+          // revert (the receipt resolves with status 0); treat it as precheck
+          // staleness too so both surfaces are counted together.
+          const staleness = waitErr.code === "CALL_EXCEPTION" || undefined;
           console.error(`❌ Liquidation confirm failed (${tx.hash}):`, waitErr.message);
-          metrics.emit("attempt", { chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "confirm_error", tx: tx.hash, reason: waitErr.message, deliverMs, detectBlock });
+          metrics.emit("attempt", { chain: chainConfig.key, user, hf: latestHealthFactor, outcome: "confirm_error", staleness, afterPrecheckPass: true, tx: tx.hash, reason: waitErr.message, deliverMs, detectBlock });
         }
         if (nonceManager) await nonceManager.resync();
       })
