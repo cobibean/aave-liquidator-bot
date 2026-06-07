@@ -222,6 +222,71 @@ const CHAIN_CONFIGS = {
     borrowScanChunkSize: 20_000,
     swapRouter: "",
   },
+  // --- Track-1 thin-chain additions (2026-06-06) ---
+  // Probed (scripts/probeChainWinnability.js, 7d): OPEN field + real non-dust flow.
+  // Scroll: 123 liqs/7d, 13 distinct liquidators, top 41% (vs Base's single-pack 100%);
+  //   104 distinct victims (real borrower churn). Sample victims repaid $143–$1,804 USDC.
+  // Running DETECTION-ONLY for now: NO liquidator address set → bot builds tiers + feeds
+  //   winscan but does not send. Send-capability = fast-follow (fund gas + deploy the
+  //   AaveLiquidatorSwapRouter02 contract + verify the swapRouter below via
+  //   probeCollateralVenues.js). See docs/proposal-chain-switch-2026-06-06.md.
+  scroll: {
+    key: "scroll",
+    name: "Scroll",
+    chainId: 534352,
+    nativeToken: "ETH",
+    rpcUrl: "https://rpc.scroll.io",
+    rpcUrls: ["https://rpc.scroll.io", "https://scroll.drpc.org"],
+    poolAddressesProvider: "0x69850D0B276776781C063771b161bd8894BCdD04",
+    pool: "0x11fCfe756c05AD438e312a7fd934381537D3cFfe",
+    protocolDataProvider: "0xBEa2B648f05887eCbF1d115da8b7E4A317975A51",
+    debtAssetAddress: "0x06eFdBFf2a14a7c8E15944D1F4A48F9F95F663A4", // USDC (native)
+    debtSymbol: "USDC",
+    gasPriceBumpGwei: "0",
+    liquidationGasLimit: 2_000_000,
+    borrowScanBlocks: 120_000,
+    borrowScanChunkSize: 10_000,
+    borrowBackfillBlocks: 40_000_000, // max-depth cap; > deployment depth (~31M) so Scroll backfills fully
+    deploymentBlock: 2_618_764, // Aave v3 Pool first code block (binary-searched, public RPC)
+    priceOracle: "0x04421D8C506E2fA2371a08EfAaBf791F624054F3",
+    wrappedNative: "0x5300000000000000000000000000000000000004",
+    // Uniswap V3 SwapRouter02 on Scroll (official deployments list; factory
+    // 0x70C62C8b8e801124A4Aa81ce07b637A3e83cb919). UNVERIFIED for our collateral set —
+    // confirm with probeCollateralVenues.js before enabling sends.
+    swapRouter: "0xfC30937f5cDe93Df8d48aCAF7e6f5D8D8A31F636",
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    // NOTE: no hardenedLiquidator/pathAware and no *_AAVE_LIQUIDATOR_ADDRESS yet → DETECTION-ONLY.
+  },
+  // Gnosis: 35 liqs/7d, 6 distinct liquidators, top 40% (most fragmented field probed);
+  //   30 distinct victims. Sample victims repaid $963–$1,476 (EURe / USDC.e / WXDAI).
+  // DETECTION-ONLY: Gnosis has NO clean Uniswap V3 (Honeyswap/Balancer ecosystem) — the
+  //   swapRouter is intentionally LEFT BLANK until a working V3-style venue is verified.
+  //   Do NOT enable sends here until that's resolved (a bad router = silent revert on
+  //   every liquidation, the documented swap-router-v3-fix failure mode).
+  gnosis: {
+    key: "gnosis",
+    name: "Gnosis Chain",
+    chainId: 100,
+    nativeToken: "xDAI",
+    rpcUrl: "https://rpc.gnosischain.com",
+    rpcUrls: ["https://rpc.gnosischain.com", "https://gnosis.drpc.org"],
+    poolAddressesProvider: "0x36616cf17557639614c1cdDb356b1B83fc0B2132",
+    pool: "0xb50201558B00496A145fE76f7424749556E326D8",
+    protocolDataProvider: "0xF1F5acB596568895393cB5E4D0452D6592A2fA70",
+    debtAssetAddress: "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0", // USDC.e (most-seen debt in probe)
+    debtSymbol: "USDC.e",
+    gasPriceBumpGwei: "0",
+    liquidationGasLimit: 2_000_000,
+    borrowScanBlocks: 120_000,
+    borrowScanChunkSize: 10_000,
+    borrowBackfillBlocks: 30_000_000, // max-depth cap; > deployment depth (~16M from floor) so Gnosis backfills fully
+    deploymentBlock: 30_293_057, // Aave v3 Pool first code block (binary-searched, public RPC)
+    priceOracle: "0xeb0a051be10228213BAEb449db63719d6742F7c4",
+    wrappedNative: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d", // WXDAI
+    swapRouter: "", // INTENTIONALLY BLANK — no verified V3 venue on Gnosis yet (detection-only)
+    liquidatorArtifact: "AaveLiquidatorSwapRouter02",
+    // NOTE: DETECTION-ONLY (no liquidator addr, no swap router).
+  },
 };
 
 const DEFAULT_CHAIN_KEYS = ["arbitrum", "base", "avalanche", "optimism"];
