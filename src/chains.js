@@ -251,11 +251,13 @@ const CHAIN_CONFIGS = {
     priceOracle: "0x04421D8C506E2fA2371a08EfAaBf791F624054F3",
     wrappedNative: "0x5300000000000000000000000000000000000004",
     // Uniswap V3 SwapRouter02 on Scroll (official deployments list; factory
-    // 0x70C62C8b8e801124A4Aa81ce07b637A3e83cb919). UNVERIFIED for our collateral set —
-    // confirm with probeCollateralVenues.js before enabling sends.
-    swapRouter: "0xfC30937f5cDe93Df8d48aCAF7e6f5D8D8A31F636",
+    // 0x70C62C8b8e801124A4Aa81ce07b637A3e83cb919). VERIFIED 2026-06-07 via
+    // probeCollateralVenues.js: 100% V3 coverage of the live collateral set
+    // (WETH/wstETH/weETH -> USDC all have direct or 2-hop-via-WETH pools).
+    swapRouter: "0xfc30937f5cDe93Df8d48aCAF7e6f5D8D8A31F636",
     liquidatorArtifact: "AaveLiquidatorSwapRouter02",
-    // NOTE: no hardenedLiquidator/pathAware and no *_AAVE_LIQUIDATOR_ADDRESS yet → DETECTION-ONLY.
+    hardenedLiquidator: true, // supports triggerLiquidationWithMinProfit
+    pathAware: true, // V3 path-aware contract deployed 2026-06-07 at 0x6ba5901f… (SCROLL_AAVE_LIQUIDATOR_ADDRESS)
   },
   // Gnosis: 35 liqs/7d, 6 distinct liquidators, top 40% (most fragmented field probed);
   //   30 distinct victims. Sample victims repaid $963–$1,476 (EURe / USDC.e / WXDAI).

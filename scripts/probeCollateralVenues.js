@@ -39,6 +39,8 @@ const PROPOSED_V3 = {
   avalanche: { router: "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE", factory: "0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD" },
   // plasma already V3-correct; use the configured router/factory.
   plasma: { router: "0x807F4E281B7A3B324825C64ca53c69F0b418dE40", factory: "0xcb2436774C3e191c85056d248EF4260ce5f27A9D" },
+  // Scroll: official Uniswap V3 (deployments list). Verifying collateral coverage before send-enabling.
+  scroll: { router: "0xfC30937f5cDe93Df8d48aCAF7e6f5D8D8A31F636", factory: "0x70C62C8b8e801124A4Aa81ce07b637A3e83cb919" },
 };
 
 // Limit how many watchlist wallets to resolve per chain (lowest-HF would be ideal
